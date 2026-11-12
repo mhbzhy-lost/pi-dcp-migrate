@@ -99,7 +99,7 @@ async function loadRun(directory, sessionHash, runId) {
         try {
             const recordDirectory = await safePath(directory, name);
             const record = await readJson(recordDirectory, "record.json");
-            const allowed = ["request", "requested", "plans", "materialization", "commit", "tool-complete", "tool-error", "context", "lifecycle"];
+            const allowed = ["request", "requested", "plans", "materialization", "commit", "tool-complete", "tool-error", "context", "lifecycle", "injection"];
             if (!object(record) || record.formatVersion !== 1 || record.processRunId !== runId || record.seq !== Number(name) ||
                 !allowed.includes(record.event) || !object(record.attachments) || !object(record.identity) ||
                 record.identity.sessionId !== manifest.identity.sessionId || record.identity.sessionFile !== manifest.identity.sessionFile ||
@@ -162,6 +162,42 @@ function checkEvent(event, data) {
     if (event === "commit" && (!object(body.block) || !Number.isSafeInteger(body.block.blockId) || typeof body.block.summary !== "string" ||
         typeof body.block.compressMessageId !== "string" || typeof body.block.compressCallId !== "string" || body.phase !== "in-memory-only"))
         throw new Error("内存提交事实格式不符");
+    if (event === "injection") {
+        if (body.phase === "system-prompt") {
+            if (typeof body.appendedText !== "string" || typeof body.systemPrompt !== "string"
+                || !body.systemPrompt.endsWith(body.appendedText))
+                throw new Error("系统提示注入正文不符");
+        }
+        else if (body.phase === "compression-request") {
+            if (body.delivery !== "queued-via-sendUserMessage" || !object(body.message)
+                || body.message.role !== "user" || typeof body.message.content !== "string")
+                throw new Error("命令注入正文不符");
+        }
+        else {
+            if (!["compression-summary", "context-reminder", "message-id"].includes(body.phase)
+                || !Array.isArray(body.injections) || !Number.isSafeInteger(body.outputMessageCount)
+                || body.outputMessageCount < 0)
+                throw new Error("消息注入阶段格式不符");
+            const ordinals = new Set();
+            for (const item of body.injections) {
+                if (!object(item) || !Number.isSafeInteger(item.outputOrdinal) || item.outputOrdinal < 0
+                    || item.outputOrdinal >= body.outputMessageCount || ordinals.has(item.outputOrdinal))
+                    throw new Error("注入位置不符");
+                ordinals.add(item.outputOrdinal);
+                if (body.phase === "compression-summary" ? item.before !== null : !object(item.before))
+                    throw new Error("注入前正文格式不符");
+                if (!object(item.after))
+                    throw new Error("注入后正文缺失");
+                for (const entry of [item.before, item.after]) {
+                    if (entry === null)
+                        continue;
+                    if (!object(entry) || entry.ordinal !== item.outputOrdinal || entry.sha256 !== auditHash(entry.message)
+                        || entry.bytes !== Buffer.byteLength(JSON.stringify(entry.message)))
+                        throw new Error("注入正文哈希/字节数不符");
+                }
+            }
+        }
+    }
     if (event === "lifecycle" && typeof body.event !== "string")
         throw new Error("缺少生命周期名称");
 }

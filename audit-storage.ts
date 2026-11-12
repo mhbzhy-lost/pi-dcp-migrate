@@ -49,7 +49,8 @@ export function createAuditRecorder(options: AuditRecorderOptions): AuditRecorde
         source ??= productionSource();
         const manifest: AuditRunManifest = { formatVersion: 1, processRunId, sessionHash: auditSessionHash(run.identity),
             startedAt: new Date().toISOString(), identity: run.identity, maxRunBytes: options.config.maxRunBytes,
-            ...source, boundary: "DCP context handler; not provider request" };
+            ...source, boundary: "DCP context handler; not provider request",
+            ...(options.injectionLogging ? { injectionLogging: options.injectionLogging } : {}) };
         const text = JSON.stringify(manifest, null, 2) + "\n";
         // run manifest 与一次终态共用额外 64 KiB 元数据额度；不挤占正文预算。
         if (Buffer.byteLength(text) > AUDIT_STATUS_MAX_BYTES / 2) throw new Error("Audit manifest metadata exceeds limit");
@@ -98,6 +99,8 @@ export function createAuditRecorder(options: AuditRecorderOptions): AuditRecorde
             [name, { path: `${name}.json`, bytes: Buffer.byteLength(text), sha256: digest(text) }]));
         const entry: AuditRecord = { formatVersion: 1, processRunId, seq, time: new Date().toISOString(),
             identity: { ...run.identity }, event, contextPassId: pass ?? null, attachments: refs };
+        const completesPass = event === "context" || (event === "injection" && attachments.body !== null
+            && typeof attachments.body === "object" && "phase" in attachments.body && attachments.body.phase === "message-id");
         const recordText = JSON.stringify(entry, null, 2) + "\n";
         const size = Buffer.byteLength(recordText) + Object.values(refs).reduce((total, ref) => total + ref.bytes, 0);
         queue = queue.then(async () => {
@@ -113,7 +116,7 @@ export function createAuditRecorder(options: AuditRecorderOptions): AuditRecorde
                 await writeFile(join(partial, "record.json"), recordText, { mode: 0o600, flag: "wx" });
                 await rename(partial, join(run.directory, name));
                 run.used += size;
-                if (event === "context" && pass !== undefined) run.lastPass = pass;
+                if (completesPass && pass !== undefined) run.lastPass = pass;
             } catch (error) { await terminate(run, "io", error); }
         });
     }

@@ -9,7 +9,7 @@ function full(title, value) {
 const eventLabels = { request: "模型原始请求", requested: "边界解析/当时映射",
     plans: "事务扩展与合并", materialization: "模型摘要 → 旧块展开 → 保护追加 → 最终回填",
     commit: "内存提交（不等于落盘/应用）", "tool-complete": "工具完成", "tool-error": "工具失败（此前提交未回滚）",
-    context: "DCP 上下文应用", lifecycle: "生命周期" };
+    context: "DCP 上下文应用", lifecycle: "生命周期", injection: "DCP 实际注入正文与判定依据" };
 function bodyObject(entry) {
     const value = entry.data.body;
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -78,7 +78,7 @@ export function renderAuditHtml(session) {
         `<meta name="referrer" content="no-referrer"><title>DCP 本地压缩审计</title>` +
         `<style>body{max-width:1100px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f5;padding:1em}article{border-top:1px solid #bbb;margin:2em 0}summary{cursor:pointer}h1,h2,h3{overflow-wrap:anywhere}</style></head><body>` +
         `<h1>DCP 本地压缩审计</h1><p>会话 hash：${escapeAuditHtml(session.sessionHash)}</p>` +
-        `<p>边界：DCP context handler 输入 → 摘要投影 → DCP 输出。不是最终 provider 请求，不证明模型已收到。contextPassId 不是 HTTP 请求 ID。</p>` +
+        `<p>边界：DCP 系统提示追加，以及 context handler 输入 → 摘要投影 → DCP 输出。不是最终 provider 请求，不证明模型已收到。contextPassId 不是 HTTP 请求 ID。</p>` +
         `<p>所有附件原文完整折叠展示，不静默截断。字节量为 JSON UTF-8 实际字节，不是 token、账单、缓存或语义质量评分。原文可能包含敏感信息，请勿分享。</p>` +
         full(issues.length ? "记录缺口 / 暂停 / 完整性问题" : "未发现文件完整性缺口（不代表摘要语义正确）", issues) +
         full("已提交但尚未观察到同会话应用；存在缺口时是否应用未知", pending) + sections.join("") + "</body></html>";

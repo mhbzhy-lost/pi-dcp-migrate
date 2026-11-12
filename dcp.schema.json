@@ -9,7 +9,7 @@
         "audit": {
             "type": "object",
             "additionalProperties": false,
-            "description": "本地全量压缩审计。仅全局配置或 PI_CONFIG_DIR 允许；项目 .pi 中出现此字段即拒绝加载。默认关闭，不采集 provider 请求或凭据，不自动删除历史。",
+            "description": "本地全量压缩审计。仅全局配置或 PI_CONFIG_DIR 允许；项目 .pi 中出现此字段即拒绝加载。默认关闭全量压缩审计；注入日志始终启用，共用 maxRunBytes 预算，不采集 provider 请求或凭据，不自动删除历史。",
             "properties": {
                 "enabled": { "type": "boolean", "default": false },
                 "maxRunBytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991, "default": 268435456 }

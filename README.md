@@ -90,7 +90,7 @@ DCP 读取自己的小配置，按以下顺序搜索（**后者覆盖前者**）
   "enabled": true,                    // false 时不注册工具/命令，不注入指引，不改写上下文
   "debug": false,                     // 调试日志
   "audit": {                         // 仅全局或 PI_CONFIG_DIR 可信层允许，项目层拒绝
-    "enabled": false,                // 默认关闭，与 debug 独立
+    "enabled": false,                // 默认关闭全量压缩审计；注入日志始终启用
     "maxRunBytes": 268435456          // 单次录制预算，正安全整数；默认 256 MiB
   },
   "protectedFilePatterns": [],        // 命中文件的工具输出追加进摘要
@@ -146,9 +146,15 @@ DCP 的会话状态写入 sidecar 文件：`$XDG_DATA_HOME/pi/dcp/<sessionKey>.j
 
 ## 本地压缩审计：持续观测移除了什么、回填了什么
 
-审计是独立旁路，默认关闭；不修改模型决策、摘要、工具响应或 sidecar。**只录制 DCP context handler 的实际输入、摘要投影、DCP 输出，不是最终 provider 请求，也不证明模型已收到。** 不抓系统提示、认证来源、网络头或 provider payload，不额外调用模型、上传或遥测。debug 开关与它无关。
+扩展启用时，**注入日志始终开启**，不依赖 debug 或 `audit.enabled`。每次 `before_agent_start` 保存本扩展实际追加的系统提示正文和返回的完整系统提示；每次 `context` 分别记录 `compression-summary`、`context-reminder`、`message-id` 三个阶段，保存所有实际新增/修改消息的位置、身份、阶段前后完整正文及 SHA-256。历史提醒和消息 ID 每次重放都重新记录；`/dcp-compress` 通过 `sendUserMessage` 排队的用户消息也保存完整正文，阶段名为 `compression-request`（排队不等于模型已收到）。没有注入的阶段也记录空数组，因此不需要从模型回答或正文标记猜测来源。每次 handler 返回前等待日志 flush。
 
-在全局配置或显式 `PI_CONFIG_DIR/dcp.jsonc` 加入 `"audit": {"enabled": true}` 后加载扩展。项目 `.pi` 中出现 `audit` 字段（包括 false）均拒绝，防止仓库静默采集正文或放大预算。扩展 `enabled:false` 时也不录制。
+提醒阶段另存当前模型、Host 窗口与 DCP 使用的窗口、最近有效 assistant 的原始 usage 和条目 ID、DCP 求和结果与占比、阈值、最小消息间隔、上次原生压缩时间及处理前后的提醒锚点。由此可以核对窗口取值、usage 口径、新增提醒和历史提醒重放。系统提示与后续 context 通过进程内 `agentTurnId` 关联，消息阶段通过 `contextPassId` 关联。run manifest 的 `injectionLogging` 标明新录制的范围和是否同时启用全量压缩审计，旧 run 不具备这一覆盖保证。
+
+**这些记录证明本扩展实际生成并返回了什么，不是最终 provider 请求，也不证明模型已收到。** 后续扩展或 Host 仍可能修改内容。日志不额外读取认证来源、网络头或 provider payload，不额外调用模型、上传或遥测。存储预算/IO 故障仍按下文暂停并警告，不能声称故障期间记录完整。
+
+全量压缩审计仍是独立旁路，默认关闭；不修改模型决策、摘要、工具响应或 sidecar。
+
+在全局配置或显式 `PI_CONFIG_DIR/dcp.jsonc` 加入 `"audit": {"enabled": true}` 后加载扩展，可额外录制全量压缩审计。`audit.enabled:false` 仍保留注入日志。项目 `.pi` 中出现 `audit` 字段（包括 false）均拒绝，防止仓库改变审计范围或放大预算。扩展 `enabled:false` 时不注入也不录制。
 
 录制目录固定为 `$XDG_DATA_HOME/pi/dcp-audit/v1/<session-key-hash>/<processRunId>/`，未设 XDG 时为 `~/.local/share/pi/dcp-audit/v1/`。hash 来自会话文件身份（无文件时用 sessionId），不直接拼用户路径；新目录 `0700`、新文件与报告 `0600`。每条记录附件有 UTF-8 字节数和 SHA-256，先写私有 partial 再原子发布完整记录。关闭时等待 flush，不复用 sidecar 保存审计。
 
@@ -170,7 +176,7 @@ npm run audit:report -- --session <session-key-hash> --out report.html
 
 预算默认 256 MiB/录制 run，正文不去重，长会话的重复快照可能很快耗尽。预算到达或 IO/序列化失败时暂停此 run，用户收到一次警告，尽可能写一个不含正文的终止状态（最多 64 KiB），显示最后完整/当前 contextPass、已用与余额；压缩与原会话继续，不把审计错误反馈模型。文件系统完全不可写时状态可能也无法落盘，因此报告不能把没有 status 当完整证明，会检查关闭/partial 等线索。
 
-**不会自动清理历史。** 可关闭 audit，或手动清理确认不再需要的单个录制 run 目录；切勿误删 sidecar/session。预算不足可保留旧 run，正常重启同会话开启新 run 续录，暂停区间仍是缺口。字节数不是实际 token、账单、缓存收益或摘要质量评分。
+**不会自动清理历史。** 可关闭全量压缩审计以减少记录量，或手动清理确认不再需要的单个录制 run 目录；注入日志随扩展启用而持续记录。切勿误删 sidecar/session。预算不足可保留旧 run，正常重启同会话开启新 run 续录，暂停区间仍是缺口。字节数不是实际 token、账单、缓存收益或摘要质量评分。
 
 **隐私警告：** 完整正文可能含源码、思考文本、个人信息和会话中已有的秘密。不额外读取凭据不等于自动脱敏；精确比较需要保留原值。不要提交、上传或分享原始审计/HTML。选择边界、丢失约束、事实是否可信仍需持续人工判断，本功能不自动给摘要打分。
 

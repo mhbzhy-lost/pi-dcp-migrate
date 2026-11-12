@@ -22,6 +22,8 @@ import {
 } from "./session-runtime.ts";
 import { createSessionState, resetSessionState, type SessionState } from "./types.ts";
 import { createAuditRecorder } from "./audit-storage.ts";
+import { injectionSnapshot, recordInjectionStage } from "./injection-audit.ts";
+import { getCurrentTokenUsage } from "./compression-state.ts";
 import { auditSnapshot, diffAuditProjection } from "./audit-projection.ts";
 import { observeAudit, type AuditRecorder, type AuditProjectionTrace } from "./audit-types.ts";
 
@@ -35,6 +37,7 @@ interface DcpRuntime {
 export class DcpController {
     private readonly runtime: DcpRuntime;
     private contextPass = 0;
+    private agentTurn = 0;
     private auditNotify: ((message: string) => void) | undefined;
 
     constructor(private readonly pi: ExtensionAPI, cwd = process.cwd()) {
@@ -50,12 +53,13 @@ export class DcpController {
     install(): void {
         const { config, logger, state } = this.runtime;
         if (!config.enabled) return;
-        this.runtime.audit = createAuditRecorder({ config: config.audit,
+        this.runtime.audit = createAuditRecorder({ config: { ...config.audit, enabled: true },
+            injectionLogging: { boundary: "DCP extension output; not provider request", detailedCompressionAudit: config.audit.enabled },
             warn: (message) => { if (this.auditNotify) this.auditNotify(message); else console.error(message); } });
-        registerCompressTool({ pi: this.pi, state, config, logger, audit: this.runtime.audit, prompts: () => RUNTIME_PROMPTS });
-        registerCommands({ pi: this.pi });
+        registerCompressTool({ pi: this.pi, state, config, logger, audit: config.audit.enabled ? this.runtime.audit : undefined, prompts: () => RUNTIME_PROMPTS });
+        registerCommands({ pi: this.pi, audit: (ctx) => this.prepareAudit(ctx) });
         this.pi.on("context", (event, ctx) => this.processContext(event.messages, ctx));
-        this.pi.on("before_agent_start", (event) => this.processBeforeAgentStart(event.systemPrompt));
+        this.pi.on("before_agent_start", (event, ctx) => this.processBeforeAgentStart(event.systemPrompt, ctx));
         this.pi.on("message_end", (event) => this.stripAssistantMetadata(event.message));
         this.pi.on("session_start", async (event, ctx) => {
             await this.startSession(ctx);
@@ -90,7 +94,6 @@ export class DcpController {
         rawMessages: AgentMessage[],
         ctx: ExtensionContext,
     ): Promise<{ messages: AgentMessage[] } | void> {
-        if (!rawMessages.length) return;
         const { state, config, logger } = this.runtime;
         const canonical = await buildCanonicalConversation(ctx);
         const messages = await conversationFromContext(rawMessages, ctx, canonical);
@@ -103,13 +106,32 @@ export class DcpController {
         const audit = this.prepareAudit(ctx);
         const pass = ++this.contextPass;
         const trace: AuditProjectionTrace[] | undefined = audit?.active ? [] : undefined;
-        const before = audit?.active && state.prune.messages.activeBlockIds.size
+        const before = config.audit.enabled && audit?.active && state.prune.messages.activeBlockIds.size
             ? this.freezeAudit(() => auditSnapshot(messages)) : undefined;
         const rendered = pruneMessages(state, logger, messages, trace);
-        const projection = before ? this.freezeAudit(() => auditSnapshot(rendered, trace)) : undefined;
+        const projection = injectionSnapshot(audit, rendered, trace);
+        const model = { agentTurnId: this.agentTurn, provider: ctx.model?.provider ?? null, id: ctx.model?.id ?? null,
+            contextWindow: state.modelContextLimit ?? null, hostContextWindow: ctx.model?.contextWindow ?? null };
+        recordInjectionStage(audit, pass, "compression-summary", undefined, projection, { model },
+            trace?.flatMap((item) => item.action === "insert" ? [item.outputOrdinal] : []) ?? []);
+        const anchorsBefore = [...state.nudges.contextLimitAnchors];
+        const usageMessage = [...rendered].reverse().find((entry) => entry.message.role === "assistant"
+            && entry.message.usage && entry.message.usage.output > 0);
+        const currentTokens = getCurrentTokenUsage(state, rendered);
         injectCompressNudges(state, config, logger, rendered, RUNTIME_PROMPTS);
+        const nudged = injectionSnapshot(audit, rendered, trace);
+        recordInjectionStage(audit, pass, "context-reminder", projection, nudged, {
+            model, currentTokens, percent: state.modelContextLimit && currentTokens > 0
+                ? currentTokens / state.modelContextLimit * 100 : null,
+            thresholdPercent: config.nudge.thresholdPercent, minMessageInterval: config.nudge.minMessageInterval,
+            usageEntryId: usageMessage?.id ?? null,
+            usage: usageMessage?.message.role === "assistant" ? usageMessage.message.usage : null,
+            lastCompaction: state.lastCompaction, anchorsBefore, anchorsAfter: [...state.nudges.contextLimitAnchors],
+        });
         injectMessageIdTags(state, rendered);
-        if (audit?.active) {
+        const output = injectionSnapshot(audit, rendered, trace);
+        recordInjectionStage(audit, pass, "message-id", nudged, output, { model });
+        if (config.audit.enabled && audit?.active) {
             this.freezeAudit(() => {
                 const meta = { contextPassId: pass, messageRefs: [...state.messageIds.byRawId],
                     activeBlocks: [...state.prune.messages.activeBlockIds].map((id) => {
@@ -117,17 +139,16 @@ export class DcpController {
                         return { blockId: id, compressCallId: block.compressCallId ?? null,
                             compressMessageId: block.compressMessageId, anchorMessageId: block.anchorMessageId };
                     }), inputCount: messages.length, outputCount: rendered.length };
-                if (before && projection && trace) {
-                    const output = auditSnapshot(rendered, trace);
-                    // 这两个调用之间只有本扩展原有的提醒/ID 注入；不从正文标题猜来源。
+                if (before && projection && trace && output) {
+                    // 这两个快照之间只有本扩展原有的提醒/ID 注入；不从正文标题猜来源。
                     const annotations = projection.entries.flatMap((entry, ordinal) => entry.sha256 !== output.entries[ordinal]?.sha256
                         ? [{ ordinal, kind: "reminder-or-message-id" as const }] : []);
                     const diff = diffAuditProjection(before, projection, output, trace, annotations);
                     audit.context({ meta, before, projection, output, trace, annotations, diff }, pass);
                 } else audit.context({ meta }, pass);
             });
-            await audit.flush();
         }
+        await audit?.flush();
         return { messages: rendered.map((entry) => entry.message) };
     }
 
@@ -153,14 +174,23 @@ export class DcpController {
         await audit?.flush();
     }
 
-    private processBeforeAgentStart(systemPrompt: string): { systemPrompt: string } | void {
+    private async processBeforeAgentStart(systemPrompt: string, ctx: ExtensionContext): Promise<{ systemPrompt: string } | void> {
+        this.agentTurn++;
         if (isInternalAgent(systemPrompt)) return;
         const { config } = this.runtime;
         const extension = renderSystemPrompt(
             RUNTIME_PROMPTS,
             buildProtectedToolsExtension(config.compress.protectedTools),
         );
-        return extension ? { systemPrompt: `${systemPrompt}\n\n${extension}` } : undefined;
+        if (!extension) return;
+        const result = { systemPrompt: `${systemPrompt}\n\n${extension}` };
+        const audit = this.prepareAudit(ctx);
+        observeAudit(audit, "injection", () => ({ phase: "system-prompt", agentTurnId: this.agentTurn,
+            model: { provider: ctx.model?.provider ?? null, id: ctx.model?.id ?? null,
+                contextWindow: ctx.model?.contextWindow ?? null },
+            appendedText: `\n\n${extension}`, systemPrompt: result.systemPrompt }));
+        await audit?.flush();
+        return result;
     }
 
     private stripAssistantMetadata(message: AgentMessage): { message: AgentMessage } | void {

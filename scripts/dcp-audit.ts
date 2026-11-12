@@ -27,7 +27,7 @@ async function main(): Promise<number> {
     if (!session) {
         if (out || run || check) throw new Error("--out/--run/--check 需要 --session");
         const entries = await listAuditSessions();
-        if (!entries.length) console.log("无记录（审计默认关闭；不会创建录制目录）");
+        if (!entries.length) console.log("无记录（启用新版扩展后自动记录注入；旧会话不会补录）");
         for (const entry of entries) {
             console.log(`${entry.sessionHash} runs=${entry.runs} paused=${entry.paused} incomplete=${entry.incomplete}`);
             console.log(`node dist/scripts/dcp-audit.js --session ${entry.sessionHash} --check`);

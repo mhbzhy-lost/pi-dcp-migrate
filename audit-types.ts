@@ -18,7 +18,7 @@ export interface AuditBlockIdentity {
     anchorMessageId: string;
 }
 export type AuditEvent = "request" | "requested" | "plans" | "materialization" | "commit" |
-    "tool-complete" | "tool-error" | "context" | "lifecycle";
+    "tool-complete" | "tool-error" | "context" | "lifecycle" | "injection";
 export interface AuditAttachment { path: string; bytes: number; sha256: string }
 export interface AuditRecord {
     formatVersion: 1;
@@ -41,6 +41,7 @@ export interface AuditRunManifest {
     productionSourceFingerprint: string;
     productionFiles: Record<string, string>;
     boundary: "DCP context handler; not provider request";
+    injectionLogging?: { boundary: "DCP extension output; not provider request"; detailedCompressionAudit: boolean };
 }
 export interface AuditStatus {
     formatVersion: 1;
@@ -71,6 +72,7 @@ export interface AuditRecorder extends AuditObserver {
 }
 export interface AuditRecorderOptions {
     config: AuditConfig;
+    injectionLogging?: { boundary: "DCP extension output; not provider request"; detailedCompressionAudit: boolean };
     warn: (message: string) => void;
 }
 export interface AuditSnapshotEntry {
