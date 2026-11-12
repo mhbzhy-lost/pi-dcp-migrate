@@ -77,7 +77,10 @@ export class DcpController {
             await this.recordLifecycle(ctx, event.type, { reason: event.reason, targetSessionFile: event.targetSessionFile });
         });
         this.pi.on("session_shutdown", async (event, ctx) => {
-            if (state.sessionKey) void saveSessionState(state, logger);
+            // Async handler: the Host awaits session_shutdown handlers before process
+            // exit, so the sidecar write completes instead of being truncated by
+            // process.exit. saveSessionState catches and logs its own errors.
+            if (state.sessionKey) await saveSessionState(state, logger);
             await this.recordLifecycle(ctx, event.type, { reason: event.reason, targetSessionFile: event.targetSessionFile });
             await this.runtime.audit?.flush();
         });
