@@ -69,16 +69,15 @@ state.modelContextLimit = 1;
 assignMessageRefs(state, messages);
 
 const config = getConfig(process.cwd());
-config.compress.maxContextLimit = 1_000;
-config.compress.minContextLimit = 1;
-config.compress.nudgeForce = "soft";
 
-injectMessageIdTags(state, config, messages);
+injectMessageIdTags(state, messages);
+// Anchor the single soft reminder on the tool-call assistant (as an earlier render above
+// the usage threshold would have persisted). injectCompressNudges must never insert text
+// into an assistant carrying tool calls: it has to relocate the reminder after the
+// complete transaction, onto the last tool result.
+state.nudges.contextLimitAnchors.add("assistant");
 injectCompressNudges(state, config, new Logger(false), messages, {
-    system: "",
-    contextLimitNudge: "",
-    turnNudge: "(dcp-system-reminder\nCompress now.\n)",
-    iterationNudge: "",
+    contextNudge: "(dcp-system-reminder\nCompress now.\n)",
 });
 
 assert(toolAssistant.content.every((block) => block.type === "toolCall"),

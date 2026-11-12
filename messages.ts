@@ -14,8 +14,6 @@ export {
     type ParsedBoundaryId,
 } from "./conversation.ts";
 export {
-    countTurns,
-    getActiveSummaryTokenUsage,
     getCurrentTokenUsage,
     isMessageCompacted,
     resetOnCompaction,
@@ -24,11 +22,10 @@ export {
 export {
     injectIntoMessage,
     injectMessageIdTags,
-    isProtectedUserMessage,
     messageHasCompress,
     pruneMessages,
     stripHallucinations,
 } from "./context-render.ts";
-export { getLastUserMessage, injectCompressNudges, type NudgeRuntime } from "./context-nudges.ts";
-export { buildToolIdList, buildToolMeta, deduplicate, purgeErrors } from "./tool-pruning.ts";
+export { injectCompressNudges, type NudgeRuntime } from "./context-nudges.ts";
+export { buildToolMeta } from "./tool-metadata.ts";
 export { assistantHasToolCall, findLastToolResultForAssistant } from "./tool-transactions.ts";

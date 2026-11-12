@@ -4,6 +4,7 @@ import type { CompressionRuntime } from "./compression-types.ts";
 import type { RangePlan, SearchContext, Selection } from "./compression-planner.ts";
 import { getFilePathsFromParameters, isFilePathProtected, isToolNameProtected } from "./patterns.ts";
 import type { CompressionBlock } from "./types.ts";
+import { observeAudit, type AuditProvenance } from "./audit-types.ts";
 
 const COMPRESSED_BLOCK_HEADER = "[Compressed conversation section]";
 const BLOCK_PLACEHOLDER_REGEX = /\(b(\d+)\)|\{block_(\d+)\}/gi;
@@ -28,20 +29,24 @@ export function materializePlan(
         .sort((left, right) => left.rawIndex - right.rawIndex || left.inputIndex - right.inputIndex)
         .map((source) => source.summary)
         .join("\n\n");
-    const { expanded, consumed } = injectBlockPlaceholders(combined, plan, search.summaryByBlockId);
-    const protectedSummary = appendProtectedContent(runtime, plan.selection, search, expanded);
+    const provenance: AuditProvenance[] | undefined = runtime.audit?.active ? [] : undefined;
+    const { expanded, consumed } = injectBlockPlaceholders(combined, plan, search.summaryByBlockId, provenance);
+    const protectedSummary = appendProtectedContent(runtime, plan.selection, search, expanded, provenance);
     const topic = plan.sources.length === 1 ? plan.sources[0]!.topic || batchTopic : batchTopic;
+    const summary = wrapSummary(blockId, protectedSummary);
+    observeAudit(runtime.audit, "materialization", () => ({ blockId, topic, anchorMessageId: plan.anchor,
+        modelCombined: combined, oldBlocksExpanded: expanded, protectedSummary, finalSummary: summary, provenance }));
     return {
         topic,
         anchorMessageId: plan.anchor,
         startId: boundaryLabel(plan.start, search.messages),
         endId: boundaryLabel(plan.end, search.messages),
-        summary: wrapSummary(blockId, protectedSummary),
+        summary,
         consumedBlockIds: consumed,
     };
 }
 
-function injectBlockPlaceholders(summary: string, plan: RangePlan, summaries: Map<number, CompressionBlock>) {
+function injectBlockPlaceholders(summary: string, plan: RangePlan, summaries: Map<number, CompressionBlock>, provenance?: AuditProvenance[]) {
     const required = new Set(plan.selection.requiredBlockIds);
     const consumed: number[] = [];
     const seen = new Set<number>();
@@ -57,6 +62,7 @@ function injectBlockPlaceholders(summary: string, plan: RangePlan, summaries: Ma
         for (const placeholder of placeholders) {
             if (!required.has(placeholder.id) || seen.has(placeholder.id) || !summaries.has(placeholder.id)) continue;
             expanded += summary.slice(cursor, placeholder.start) + restoreSummary(summaries.get(placeholder.id)!.summary);
+            recordOldBlock(provenance, "old-block-placeholder", summaries.get(placeholder.id)!);
             cursor = placeholder.end;
             seen.add(placeholder.id);
             consumed.push(placeholder.id);
@@ -68,6 +74,7 @@ function injectBlockPlaceholders(summary: string, plan: RangePlan, summaries: Ma
         const block = summaries.get(ref.blockId);
         if (!block) throw new Error(`Compressed block not found: (b${ref.blockId})`);
         expanded = joinSummaries(expanded, restoreSummary(block.summary));
+        recordOldBlock(provenance, "old-block-boundary", block);
         seen.add(ref.blockId);
         consumed.push(ref.blockId);
     }
@@ -77,11 +84,18 @@ function injectBlockPlaceholders(summary: string, plan: RangePlan, summaries: Ma
             const block = summaries.get(id);
             if (!block) throw new Error(`Compressed block not found: (b${id})`);
             consumed.push(id);
+            recordOldBlock(provenance, "old-block-required", block);
             return `\n### (b${id})\n${restoreSummary(block.summary)}`;
         });
         expanded += "\n\nThe following previously compressed summaries were also part of this conversation section:" + restored.join("");
     }
     return { expanded, consumed };
+}
+
+function recordOldBlock(provenance: AuditProvenance[] | undefined, kind: AuditProvenance["kind"], block: CompressionBlock): void {
+    provenance?.push({ kind, blockId: block.blockId, text: restoreSummary(block.summary),
+        origin: { blockId: block.blockId, compressCallId: block.compressCallId ?? null,
+            compressMessageId: block.compressMessageId, anchorMessageId: block.anchorMessageId } });
 }
 
 function joinSummaries(left: string, right: string): string {
@@ -112,22 +126,35 @@ function boundaryLabel(ref: RangePlan["start"], messages: DcpMessage[]): string 
     return messages[ref.rawIndex]?.ref ?? "";
 }
 
-function appendProtectedContent(runtime: CompressionRuntime, selection: Selection, search: SearchContext, summary: string): string {
+function appendProtectedContent(runtime: CompressionRuntime, selection: Selection, search: SearchContext, summary: string, provenance?: AuditProvenance[]): string {
     let result = summary;
     if (runtime.config.compress.protectUserMessages) {
         const texts = selectedMessages(runtime, selection, search)
             .filter((entry) => entry.message.role === "user" && !isIgnoredUserMessage(entry))
-            .map(userText).filter((text) => text.trim());
+            .map((entry) => {
+                const text = userText(entry);
+                if (text.trim()) provenance?.push({ kind: "protected-user", entryId: entry.id, text });
+                return text;
+            }).filter((text) => text.trim());
         if (texts.length) result += "\n\nThe following user messages were sent in this conversation verbatim:" + texts.map((text) => `\n${text}`).join("");
     }
     if (runtime.config.compress.protectTags) {
         const texts = selectedMessages(runtime, selection, search).flatMap((entry) => {
             const text = entry.message.role === "user" && typeof entry.message.content === "string" ? entry.message.content : "";
-            return [...text.matchAll(/<protect>([\s\S]*?)<\/protect>/gi)].map((match) => match[1]?.trim() ?? "").filter(Boolean);
+            return [...text.matchAll(/<protect>([\s\S]*?)<\/protect>/gi)].map((match) => {
+                const value = match[1]?.trim() ?? "";
+                if (value) provenance?.push({ kind: "protected-tag", entryId: entry.id, text: value });
+                return value;
+            }).filter(Boolean);
         });
         if (texts.length) result += "\n\nThe following protected prompt information was included in this conversation verbatim:" + texts.map((text) => `\n${text}`).join("");
     }
-    const outputs = selectedMessages(runtime, selection, search).flatMap((entry) => protectedToolOutput(runtime, entry));
+    const outputs = selectedMessages(runtime, selection, search).flatMap((entry) => {
+        const values = protectedToolOutput(runtime, entry);
+        if (values.length && entry.message.role === "toolResult") provenance?.push({ kind: "protected-tool",
+            entryId: entry.id, toolCallId: entry.message.toolCallId, text: values.join("") });
+        return values;
+    });
     if (outputs.length) result += "\n\nThe following protected tools were used in this conversation as well:" + outputs.join("");
     return result;
 }
@@ -155,4 +182,3 @@ function protectedToolOutput(runtime: CompressionRuntime, entry: DcpMessage): st
     const output = entry.message.content.filter((block): block is { type: "text"; text: string } => block.type === "text").map((block) => block.text).join("\n");
     return output ? [`\n### Tool: ${entry.message.toolName}\n${output}`] : [];
 }
-

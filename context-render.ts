@@ -1,64 +1,41 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { PluginConfig } from "./config.ts";
 import { formatMessageIdTag, isIgnoredUserMessage, type DcpMessage } from "./conversation.ts";
-import { isMessageCompacted } from "./compression-state.ts";
 import type { Logger } from "./logger.ts";
 import { assistantHasToolCall } from "./tool-transactions.ts";
 import type { CompressionBlock, SessionState } from "./types.ts";
-
-const PRUNED_TOOL_OUTPUT = "[Output removed to save context - information superseded or no longer needed]";
-const PRUNED_ERROR_INPUT = "[input removed due to failed tool call]";
-
-export function isProtectedUserMessage(config: PluginConfig, entry: DcpMessage): boolean {
-    return config.compress.mode === "message" && config.compress.protectUserMessages &&
-        entry.message.role === "user" && !isIgnoredUserMessage(entry);
-}
+import type { AuditProjectionTrace } from "./audit-types.ts";
 
 export function messageHasCompress(entry: DcpMessage): boolean {
     return entry.message.role === "assistant" && entry.message.content.some((block) => block.type === "toolCall" && block.name === "compress");
 }
 
-export function pruneMessages(state: SessionState, logger: Logger, messages: DcpMessage[]): DcpMessage[] {
-    applyToolPruning(state, messages);
-    return filterCompressedRanges(state, logger, messages);
+export function pruneMessages(state: SessionState, logger: Logger, messages: DcpMessage[], trace?: AuditProjectionTrace[]): DcpMessage[] {
+    return filterCompressedRanges(state, logger, messages, trace);
 }
 
-function applyToolPruning(state: SessionState, messages: DcpMessage[]): void {
-    for (const entry of messages) {
-        if (!entry.id) continue;
-        if (isMessageCompacted(state, entry)) continue;
-        const message = entry.message;
-        if (message.role === "assistant") {
-            let changed = false;
-            for (const block of message.content) {
-                if (block.type !== "toolCall" || !state.prune.tools.has(block.id)) continue;
-                if (state.toolMeta.get(block.id)?.status !== "error") continue;
-                block.arguments = Object.fromEntries(Object.entries(block.arguments ?? {}).map(([key, value]) => [
-                    key, typeof value === "string" ? PRUNED_ERROR_INPUT : value,
-                ]));
-                changed = true;
-            }
-            if (changed) entry.message = { ...message };
-        } else if (message.role === "toolResult" && state.prune.tools.has(message.toolCallId)) {
-            if (message.toolName !== "edit" && message.toolName !== "write") {
-                entry.message = { ...message, content: [{ type: "text", text: PRUNED_TOOL_OUTPUT }] };
-            }
-        }
-    }
-}
-
-function filterCompressedRanges(state: SessionState, logger: Logger, messages: DcpMessage[]): DcpMessage[] {
+function filterCompressedRanges(state: SessionState, logger: Logger, messages: DcpMessage[], trace?: AuditProjectionTrace[]): DcpMessage[] {
     const stored = state.prune.messages;
-    if (!stored.byMessageId.size && !stored.activeByAnchorMessageId.size) return messages;
+    if (!stored.byMessageId.size && !stored.activeByAnchorMessageId.size) {
+        messages.forEach((_entry, index) => trace?.push({ action: "keep", inputOrdinal: index, outputOrdinal: index }));
+        return messages;
+    }
     const result: DcpMessage[] = [];
-    for (const entry of messages) {
+    for (const [inputOrdinal, entry] of messages.entries()) {
         const blockId = entry.id ? stored.activeByAnchorMessageId.get(entry.id) : undefined;
         const block = blockId === undefined ? undefined : stored.blocksById.get(blockId);
         if (block?.active && block.summary) {
+            trace?.push({ action: "insert", outputOrdinal: result.length, block: { blockId: block.blockId,
+                compressCallId: block.compressCallId ?? null, compressMessageId: block.compressMessageId,
+                anchorMessageId: block.anchorMessageId } });
             result.push(makeSyntheticSummaryEntry(block));
             logger.debug("Injected compress summary", { anchor: entry.id, blockId });
         }
-        if (entry.id && (stored.byMessageId.get(entry.id)?.activeBlockIds.length ?? 0) > 0) continue;
+        if (entry.id && (stored.byMessageId.get(entry.id)?.activeBlockIds.length ?? 0) > 0) {
+            trace?.push({ action: "remove", inputOrdinal, entryId: entry.id,
+                blockIds: [...stored.byMessageId.get(entry.id)!.activeBlockIds] });
+            continue;
+        }
+        trace?.push({ action: "keep", inputOrdinal, outputOrdinal: result.length });
         result.push(entry);
     }
     return result;
@@ -70,12 +47,12 @@ function makeSyntheticSummaryEntry(block: CompressionBlock): DcpMessage {
     return { id: `dcp-summary-${block.blockId}-${++syntheticCounter}`, index: 0, message };
 }
 
-export function injectMessageIdTags(state: SessionState, config: PluginConfig, messages: DcpMessage[]): void {
+export function injectMessageIdTags(state: SessionState, messages: DcpMessage[]): void {
     for (const entry of messages) {
         if (isIgnoredUserMessage(entry) || entry.message.role === "compactionSummary" || assistantHasToolCall(entry)) continue;
         const ref = entry.id ? state.messageIds.byRawId.get(entry.id) : undefined;
         if (!ref) continue;
-        injectIntoMessage(entry, formatMessageIdTag(isProtectedUserMessage(config, entry) ? "BLOCKED" : ref));
+        injectIntoMessage(entry, formatMessageIdTag(ref));
     }
 }
 
@@ -115,6 +92,5 @@ export function stripHallucinations(text: string): string {
         .replace(/<\/?dcp[^>]*>/gi, "")
         .replace(/\(dcp-system-reminder\b[\s\S]*?\n\)/gi, "")
         .replace(/\(dcp-msg-id\s+[^)\r\n]+\)/gi, "")
-        .replace(/\(dcp-compress-triggered-manually\)/gi, "")
         .trim();
 }

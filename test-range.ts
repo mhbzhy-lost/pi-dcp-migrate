@@ -1,7 +1,7 @@
 import { getConfig } from "./config.ts";
 import { createSessionState } from "./types.ts";
 import { Logger } from "./logger.ts";
-import { assignMessageRefs, buildToolIdList, buildToolMeta, countTurns, deduplicate, type DcpMessage, purgeErrors, syncCompressionBlocks, pruneMessages, injectMessageIdTags } from "./messages.ts";
+import { assignMessageRefs, buildToolMeta, type DcpMessage, syncCompressionBlocks, pruneMessages, injectMessageIdTags } from "./messages.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { formatBlockRef } from "./compress.ts";
 
@@ -21,13 +21,9 @@ const raw: AgentMessage[] = [
 ];
 
 const dcp: DcpMessage[] = raw.map((m, i) => ({ id: `e${i}`, index: i, message: m }));
-state.currentTurn = countTurns(state, dcp);
 assignMessageRefs(state, dcp);
 syncCompressionBlocks(state, logger, dcp);
-buildToolIdList(state, dcp);
-buildToolMeta(state, config, dcp);
-deduplicate(state, config, dcp);
-purgeErrors(state, config, dcp);
+buildToolMeta(state, dcp);
 
 // When: a range compression covering e0..e3 is applied
 const search = {

@@ -1,5 +1,3 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-
 export type CompressionMode = "range" | "message";
 
 export interface CompressionBlock {
@@ -51,8 +49,6 @@ export interface ToolMeta {
     tool: string;
     arguments: any;
     status: "completed" | "error" | "running";
-    turn: number;
-    tokenCount: number;
     assistantEntryId: string;
     resultEntryId?: string;
 }
@@ -63,35 +59,24 @@ export interface MessageIdState {
     nextRef: number;
 }
 
+/**
+ * Anchors for the single soft context reminder. Legacy turn/iteration anchor sets
+ * were removed; the sidecar keeps neutral placeholders for them in persistence.ts.
+ */
 export interface Nudges {
     contextLimitAnchors: Set<string>;
-    turnNudgeAnchors: Set<string>;
-    iterationNudgeAnchors: Set<string>;
-}
-
-export interface SessionStats {
-    pruneTokenCounter: number;
-    totalPruneTokens: number;
 }
 
 export interface SessionState {
     sessionKey: string | null;
-    manualMode: false | "active" | "compress-pending";
-    pendingManualTrigger: { sessionKey: string; prompt: string } | null;
-    compressPermission: "ask" | "allow" | "deny" | undefined;
     prune: {
-        tools: Map<string, number>;
         messages: PruneMessagesState;
     };
     nudges: Nudges;
-    stats: SessionStats;
     toolMeta: Map<string, ToolMeta>;
-    toolIdList: string[];
     messageIds: MessageIdState;
     lastCompaction: number;
-    currentTurn: number;
     modelContextLimit: number | undefined;
-    lastEntries: { id: string; message: AgentMessage }[];
 }
 
 export function createPruneMessagesState(): PruneMessagesState {
@@ -108,45 +93,24 @@ export function createPruneMessagesState(): PruneMessagesState {
 export function createSessionState(): SessionState {
     return {
         sessionKey: null,
-        manualMode: false,
-        pendingManualTrigger: null,
-        compressPermission: undefined,
         prune: {
-            tools: new Map(),
             messages: createPruneMessagesState(),
         },
         nudges: {
             contextLimitAnchors: new Set(),
-            turnNudgeAnchors: new Set(),
-            iterationNudgeAnchors: new Set(),
         },
-        stats: { pruneTokenCounter: 0, totalPruneTokens: 0 },
         toolMeta: new Map(),
-        toolIdList: [],
         messageIds: { byRawId: new Map(), byRef: new Map(), nextRef: 1 },
         lastCompaction: 0,
-        currentTurn: 0,
         modelContextLimit: undefined,
-        lastEntries: [],
     };
 }
 
 export function resetSessionState(state: SessionState): void {
     state.sessionKey = null;
-    state.manualMode = false;
-    state.pendingManualTrigger = null;
-    state.compressPermission = undefined;
-    state.prune = { tools: new Map(), messages: createPruneMessagesState() };
-    state.nudges = {
-        contextLimitAnchors: new Set(),
-        turnNudgeAnchors: new Set(),
-        iterationNudgeAnchors: new Set(),
-    };
-    state.stats = { pruneTokenCounter: 0, totalPruneTokens: 0 };
+    state.prune = { messages: createPruneMessagesState() };
+    state.nudges = { contextLimitAnchors: new Set() };
     state.toolMeta.clear();
-    state.toolIdList = [];
     state.messageIds = { byRawId: new Map(), byRef: new Map(), nextRef: 1 };
     state.lastCompaction = 0;
-    state.currentTurn = 0;
-    state.lastEntries = [];
 }

@@ -74,8 +74,6 @@ function streamFailedAssistant(callIds: string[], stopReason: "error" | "aborted
     assert(!!lastRef, "Messages after the filtered entry still get refs");
 
     const config = getConfig(process.cwd());
-    config.compress.protectUserMessages = false;
-    config.pruneNotification = "off";
     const ctx = { pi: {} as any, state, config, logger: new Logger(false), prompts: () => ({} as any) };
     const output = runRangeCompress(ctx, {
         topic: "full history",

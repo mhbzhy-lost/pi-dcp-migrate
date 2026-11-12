@@ -7,25 +7,11 @@ export function isMessageCompacted(state: SessionState, entry: DcpMessage): bool
     return !!entry.id && (isCompactionSummary(entry.message) || (state.prune.messages.byMessageId.get(entry.id)?.activeBlockIds.length ?? 0) > 0);
 }
 
-export function countTurns(state: SessionState, messages: DcpMessage[]): number {
-    return messages.filter((entry) => entry.message.role === "assistant" && !isMessageCompacted(state, entry)).length;
-}
-
 export function resetOnCompaction(state: SessionState): void {
     state.toolMeta.clear();
-    state.prune.tools = new Map();
     state.prune.messages = createPruneMessagesState();
     state.messageIds = { byRawId: new Map(), byRef: new Map(), nextRef: 1 };
-    state.nudges = { contextLimitAnchors: new Set(), turnNudgeAnchors: new Set(), iterationNudgeAnchors: new Set() };
-}
-
-export function getActiveSummaryTokenUsage(state: SessionState): number {
-    let total = 0;
-    for (const id of state.prune.messages.activeBlockIds) {
-        const block = state.prune.messages.blocksById.get(id);
-        if (block?.active) total += block.summaryTokens;
-    }
-    return total;
+    state.nudges = { contextLimitAnchors: new Set() };
 }
 
 export function getCurrentTokenUsage(state: SessionState, messages: DcpMessage[]): number {

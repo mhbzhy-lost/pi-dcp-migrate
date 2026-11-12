@@ -143,18 +143,23 @@ export async function saveSessionState(state: SessionState, logger: Logger): Pro
     try {
         if (!state.sessionKey) return;
         ensureStorageDir();
+        // The legacy sidecar shape is written with fixed neutral literals. manualMode,
+        // prune.tools, cumulative stats and turn/iteration anchors are serialization
+        // placeholders only: they are never read from SessionState and never drive runtime
+        // behaviour. Only contextLimitAnchors and the compression block graph come from live
+        // state. T5 removes these legacy fields from the SessionState runtime type.
         const payload: PersistedState = {
-            manualMode: !!state.manualMode,
+            manualMode: false,
             prune: {
-                tools: Object.fromEntries(state.prune.tools),
+                tools: {},
                 messages: serializeMessages(state),
             },
             nudges: {
                 contextLimitAnchors: [...state.nudges.contextLimitAnchors],
-                turnNudgeAnchors: [...state.nudges.turnNudgeAnchors],
-                iterationNudgeAnchors: [...state.nudges.iterationNudgeAnchors],
+                turnNudgeAnchors: [],
+                iterationNudgeAnchors: [],
             },
-            stats: state.stats,
+            stats: { pruneTokenCounter: 0, totalPruneTokens: 0 },
             lastUpdated: new Date().toISOString(),
         };
         await writeFile(sessionFilePath(state.sessionKey), JSON.stringify(payload, null, 2), "utf-8");
@@ -317,20 +322,12 @@ export async function applyPersistedState(
     persisted: PersistedState,
     logger: Logger,
 ): Promise<void> {
-    state.manualMode = persisted.manualMode ? "active" : false;
-    const tools = persisted.prune.tools ?? {};
-    state.prune.tools = new Map(
-        Object.entries(tools).filter((entry): entry is [string, number] => typeof entry[1] === "number"),
-    );
+    // Restore only the compression block graph and the single context-limit anchor set.
+    // Legacy shape fields (manualMode, prune.tools, cumulative stats, turn/iteration
+    // anchors) are ignored: they are not read back and restore no runtime behaviour, so T5
+    // can safely delete them from SessionState. Historical mode:"message" block read
+    // semantics stay in loadPruneMessages.
     state.prune.messages = loadPruneMessages(persisted.prune.messages);
-    state.nudges = {
-        contextLimitAnchors: new Set(asStringArray(persisted.nudges.contextLimitAnchors)),
-        turnNudgeAnchors: new Set(asStringArray(persisted.nudges.turnNudgeAnchors)),
-        iterationNudgeAnchors: new Set(asStringArray(persisted.nudges.iterationNudgeAnchors)),
-    };
-    state.stats = {
-        pruneTokenCounter: persisted.stats.pruneTokenCounter || 0,
-        totalPruneTokens: persisted.stats.totalPruneTokens || 0,
-    };
+    state.nudges.contextLimitAnchors = new Set(asStringArray(persisted.nudges.contextLimitAnchors));
     void logger;
 }

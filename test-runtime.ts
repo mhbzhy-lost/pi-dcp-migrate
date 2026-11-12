@@ -3,10 +3,7 @@ import { createSessionState, resetSessionState } from "./types.ts";
 import { Logger } from "./logger.ts";
 import {
     assignMessageRefs,
-    buildToolIdList,
     buildToolMeta,
-    countTurns,
-    deduplicate,
     type DcpMessage,
     findLastCompactionTimestamp,
     getCurrentTokenUsage,
@@ -15,18 +12,14 @@ import {
     isIgnoredUserMessage,
     parseBoundaryId,
     pruneMessages,
-    purgeErrors,
     syncCompressionBlocks,
     resetOnCompaction,
 } from "./messages.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
     buildProtectedToolsExtension,
-    CONTEXT_LIMIT_NUDGE,
-    ITERATION_NUDGE,
-    MANUAL_MODE_SYSTEM_EXTENSION,
+    CONTEXT_NUDGE,
     SYSTEM_PROMPT,
-    TURN_NUDGE,
 } from "./prompts.ts";
 
 function mkUser(text: string, id: string): AgentMessage {
@@ -81,33 +74,34 @@ raw.push(mkAssistant("Done reading files.", "a5"));
 const dcp: DcpMessage[] = raw.map((m, i) => ({ id: `e${i}`, index: i, message: m }));
 
 // When: the context pipeline runs
-state.currentTurn = countTurns(state, dcp);
 assignMessageRefs(state, dcp);
 syncCompressionBlocks(state, logger, dcp);
-buildToolIdList(state, dcp);
-buildToolMeta(state, config, dcp);
-deduplicate(state, config, dcp);
-purgeErrors(state, config, dcp);
-
-console.log("=== After dedup+purge (turn 0, errors not old enough) ===");
-console.log("pruned tool ids:", [...state.prune.tools.keys()]);
-
-// When: enough turns pass for purge-errors to apply
-state.toolMeta.get("tc4")!.turn = 0;
-state.currentTurn = 10;
-purgeErrors(state, config, dcp);
-console.log("\n=== After purge-errors (turn 10) ===");
-console.log("pruned tool ids:", [...state.prune.tools.keys()]);
+buildToolMeta(state, dcp);
 
 const pruned = pruneMessages(state, logger, dcp);
-console.log("\n=== Pruned tool output check ===");
-const tc1Result = pruned.find(m => m.message.role === "toolResult" && m.message.toolCallId === "tc1");
-console.log("tc1 (duplicate) output:", JSON.stringify(tc1Result?.message.role === "toolResult" ? tc1Result.message.content : null));
-const tc3Result = pruned.find(m => m.message.role === "toolResult" && m.message.toolCallId === "tc3");
-console.log("tc3 (unique) output:", JSON.stringify(tc3Result?.message.role === "toolResult" ? tc3Result.message.content[0] : null));
+console.log("\n=== Preserved tool output check (rule pruning removed) ===");
+const tc1Result: any = pruned.find(m => m.message.role === "toolResult" && (m.message as any).toolCallId === "tc1");
+const tc1Text = tc1Result ? tc1Result.message.content.map((b: any) => b.text).join("") : null;
+console.log("tc1 (duplicate read) output:", JSON.stringify(tc1Text));
+if (tc1Text !== "export const x = 1;") {
+    throw new Error("Duplicate tool result must be preserved verbatim, not pruned");
+}
+const tc3Result: any = pruned.find(m => m.message.role === "toolResult" && (m.message as any).toolCallId === "tc3");
+const tc3Text = tc3Result ? tc3Result.message.content.map((b: any) => b.text).join("") : null;
+console.log("tc3 (unique read) output:", JSON.stringify(tc3Text));
+if (tc3Text !== "export const y = 2;") {
+    throw new Error("Unique tool result must be preserved verbatim");
+}
+const tc4Assistant: any = pruned.find(m => m.message.role === "assistant" && (m.message as any).content.some((b: any) => b.type === "toolCall" && b.id === "tc4"));
+const tc4Call = tc4Assistant ? tc4Assistant.message.content.find((b: any) => b.type === "toolCall" && b.id === "tc4") : undefined;
+const tc4Command = tc4Call ? tc4Call.arguments.command : undefined;
+console.log("tc4 (failed bash) arguments.command:", JSON.stringify(tc4Command));
+if (tc4Command !== "bad-cmd") {
+    throw new Error("Failed tool call arguments must be preserved, not scrubbed");
+}
 
 // Then: message ID tags are injected
-injectMessageIdTags(state, config, pruned);
+injectMessageIdTags(state, pruned);
 console.log("\n=== Message ID tags ===");
 const u1 = pruned.find(m => m.id === "e0");
 const hasMessageMarker = u1?.message.role === "user" &&
@@ -116,12 +110,12 @@ const hasMessageMarker = u1?.message.role === "user" &&
 console.log("u1 has marker:", hasMessageMarker);
 if (!hasMessageMarker) throw new Error("Message ID was not injected with the parenthesized format");
 
-// When: context exceeds the max limit
-state.stats = { pruneTokenCounter: 0, totalPruneTokens: 0 };
-const overLimitConfig = { ...config, compress: { ...config.compress, maxContextLimit: 10, minContextLimit: 5 } };
+// When: context usage reaches the soft-reminder threshold of the model window.
+// The last assistant usage totals 150 tokens against a 200000-token window (0.075%),
+// so a threshold just below that must fire the single soft reminder.
+const overLimitConfig = { ...config, nudge: { thresholdPercent: 0.05, minMessageInterval: 5 } };
 injectCompressNudges(state, overLimitConfig, logger, pruned, {
-    system: "", contextLimitNudge: "(dcp-system-reminder\nCOMPRESS NOW\n)",
-    turnNudge: "", iterationNudge: "",
+    contextNudge: "(dcp-system-reminder\nCOMPRESS NOW\n)",
 });
 console.log("\n=== Nudge injection ===");
 const lastMsg = pruned[pruned.length - 1];
@@ -132,10 +126,7 @@ if (!hasNudge) throw new Error("Context nudge was not injected with the parenthe
 
 const bundledInjections = [
     SYSTEM_PROMPT,
-    CONTEXT_LIMIT_NUDGE,
-    TURN_NUDGE,
-    ITERATION_NUDGE,
-    MANUAL_MODE_SYSTEM_EXTENSION,
+    CONTEXT_NUDGE,
     buildProtectedToolsExtension(["subagent"]),
 ];
 if (bundledInjections.some(text => /<\/?dcp[\s>]/i.test(text))) {
@@ -147,27 +138,5 @@ console.log("\n=== Boundary parsing ===");
 console.log("m0001 ->", JSON.stringify(parseBoundaryId("m0001")));
 console.log("b3 ->", JSON.stringify(parseBoundaryId("b3")));
 console.log("xyz ->", JSON.stringify(parseBoundaryId("xyz")));
-
-{
-    const compressedState = createSessionState();
-    const history = [
-        mkAssistant("compressed assistant", "old"),
-        mkTool("current", "aged-error", "bash", { command: "bad" }, "failed", true).assistant,
-        mkTool("current", "aged-error", "bash", { command: "bad" }, "failed", true).result,
-        mkAssistant("recent assistant", "recent"),
-    ].map((message, index) => ({ id: `compressed-${index}`, index, message }));
-    compressedState.prune.messages.byMessageId.set("compressed-0", {
-        tokenCount: 1,
-        allBlockIds: [1],
-        activeBlockIds: [1],
-    });
-    compressedState.currentTurn = countTurns(compressedState, history);
-    buildToolIdList(compressedState, history);
-    buildToolMeta(compressedState, config, history);
-    const meta = compressedState.toolMeta.get("aged-error");
-    if (meta?.turn !== 1 || compressedState.currentTurn !== 2) {
-        throw new Error(`Tool age coordinates diverged after compression: tool=${meta?.turn}, current=${compressedState.currentTurn}`);
-    }
-}
 
 console.log("\nALL TESTS PASSED");

@@ -1,95 +1,45 @@
 /**
- * DCP configuration.
+ * DCP configuration (model-driven range-only fork).
  *
- * Ported from opencode-dynamic-context-pruning's lib/config.ts, adapted for pi:
- *  - Config search paths follow pi conventions (XDG_CONFIG_HOME/pi, .pi/).
- *  - autoUpdate and pruneNotificationType are intentionally unsupported
- *    (autoUpdate is an npm-package concept; pi has no opencode-style toast/chat split).
- *  - experimental.allowSubAgents is intentionally unsupported: pi has no in-process
- *    subagent sessions. The pi-subagents plugin spawns separate processes that run
- *    their own (independent) DCP instance, so there is nothing to gate here.
+ * Small fixed configuration surface:
+ *  - Search order is preserved: XDG_CONFIG_HOME/pi/dcp.jsonc|json (global) ->
+ *    PI_CONFIG_DIR -> nearest project .pi directory. JSONC (comments and trailing
+ *    commas) is supported at every layer.
+ *  - Unknown keys (except "$schema"), wrong types and invalid values fail closed:
+ *    loading throws with the file path and the offending key path, never echoing
+ *    the config file content. A stale upstream config (for example
+ *    compress.permission "deny") is therefore rejected instead of being silently
+ *    ignored and accidentally enabling model-driven compression.
+ *  - No default config file is ever created.
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-
-export type Permission = "ask" | "allow" | "deny";
-export type CompressMode = "range" | "message";
-export type LimitValue = number | `${number}%`;
-
-export interface Deduplication {
-    enabled: boolean;
-    protectedTools: string[];
-}
+import { AUDIT_DEFAULT_MAX_BYTES, type AuditConfig } from "./audit-types.ts";
 
 export interface CompressConfig {
-    mode: CompressMode;
-    permission: Permission;
-    showCompression: boolean;
-    summaryBuffer: boolean;
-    maxContextLimit: LimitValue;
-    minContextLimit: LimitValue;
-    modelMaxLimits?: Record<string, LimitValue>;
-    modelMinLimits?: Record<string, LimitValue>;
-    nudgeFrequency: number;
-    iterationNudgeThreshold: number;
-    nudgeForce: "strong" | "soft";
+    /** Tool names/globs whose completed outputs are appended to compression summaries. */
     protectedTools: string[];
     protectTags: boolean;
     protectUserMessages: boolean;
 }
 
-export interface Commands {
-    enabled: boolean;
-    protectedTools: string[];
-}
-
-export interface ManualModeConfig {
-    enabled: boolean;
-    automaticStrategies: boolean;
-}
-
-export interface PurgeErrors {
-    enabled: boolean;
-    turns: number;
-    protectedTools: string[];
-}
-
-export interface TurnProtection {
-    enabled: boolean;
-    turns: number;
-}
-
-export interface ExperimentalConfig {
-    /** Allow DCP processing in subagent sessions. Unsupported on pi (no-op). */
-    allowSubAgents: boolean;
-    customPrompts: boolean;
+export interface NudgeConfig {
+    /** Percent of the model context window (finite, 0 < value < 100) for the single soft reminder. */
+    thresholdPercent: number;
+    /** Minimum number of valid canonical messages between two reminder anchors (positive integer). */
+    minMessageInterval: number;
 }
 
 export interface PluginConfig {
     enabled: boolean;
     debug: boolean;
-    pruneNotification: "off" | "minimal" | "detailed";
-    commands: Commands;
-    manualMode: ManualModeConfig;
-    turnProtection: TurnProtection;
-    experimental: ExperimentalConfig;
     protectedFilePatterns: string[];
     compress: CompressConfig;
-    strategies: {
-        deduplication: Deduplication;
-        purgeErrors: PurgeErrors;
-    };
+    nudge: NudgeConfig;
+    audit: AuditConfig;
 }
-
-/**
- * Tools always protected from dedup/purge pruning. Adapted to pi's ecosystem:
- *   - "subagent" replaces opencode's "task" (the pi-subagents plugin tool)
- *   - "write"/"edit" remain (file mutations are important history)
- *   - "compress" is DCP's own tool
- */
-export const DEFAULT_PROTECTED_TOOLS = ["subagent", "compress", "write", "edit"];
 
 /**
  * Tools whose completed outputs are appended to compression summaries.
@@ -98,83 +48,20 @@ export const DEFAULT_PROTECTED_TOOLS = ["subagent", "compress", "write", "edit"]
  */
 export const COMPRESS_DEFAULT_PROTECTED_TOOLS = ["subagent"];
 
-const defaultConfig: PluginConfig = {
-    enabled: true,
-    debug: false,
-    pruneNotification: "detailed",
-    commands: {
-        enabled: true,
-        protectedTools: [...DEFAULT_PROTECTED_TOOLS],
-    },
-    manualMode: {
-        enabled: false,
-        automaticStrategies: true,
-    },
-    turnProtection: {
-        enabled: false,
-        turns: 4,
-    },
-    experimental: {
-        allowSubAgents: false,
-        customPrompts: false,
-    },
-    protectedFilePatterns: [],
-    compress: {
-        mode: "range",
-        permission: "allow",
-        showCompression: false,
-        summaryBuffer: true,
-        maxContextLimit: 100000,
-        minContextLimit: 50000,
-        nudgeFrequency: 5,
-        iterationNudgeThreshold: 15,
-        nudgeForce: "soft",
-        protectedTools: [...COMPRESS_DEFAULT_PROTECTED_TOOLS],
-        protectTags: false,
-        protectUserMessages: false,
-    },
-    strategies: {
-        deduplication: {
-            enabled: true,
-            protectedTools: [],
-        },
-        purgeErrors: {
-            enabled: true,
-            turns: 4,
-            protectedTools: [],
-        },
-    },
-};
-
-function deepCloneConfig(config: PluginConfig): PluginConfig {
+function createDefaultConfig(): PluginConfig {
     return {
-        ...config,
-        commands: {
-            enabled: config.commands.enabled,
-            protectedTools: [...config.commands.protectedTools],
-        },
-        manualMode: {
-            enabled: config.manualMode.enabled,
-            automaticStrategies: config.manualMode.automaticStrategies,
-        },
-        turnProtection: { ...config.turnProtection },
-        experimental: { ...config.experimental },
-        protectedFilePatterns: [...config.protectedFilePatterns],
+        enabled: true,
+        debug: false,
+        protectedFilePatterns: [],
+        audit: { enabled: false, maxRunBytes: AUDIT_DEFAULT_MAX_BYTES },
         compress: {
-            ...config.compress,
-            modelMaxLimits: { ...config.compress.modelMaxLimits },
-            modelMinLimits: { ...config.compress.modelMinLimits },
-            protectedTools: [...config.compress.protectedTools],
+            protectedTools: [...COMPRESS_DEFAULT_PROTECTED_TOOLS],
+            protectTags: false,
+            protectUserMessages: false,
         },
-        strategies: {
-            deduplication: {
-                ...config.strategies.deduplication,
-                protectedTools: [...config.strategies.deduplication.protectedTools],
-            },
-            purgeErrors: {
-                ...config.strategies.purgeErrors,
-                protectedTools: [...config.strategies.purgeErrors.protectedTools],
-            },
+        nudge: {
+            thresholdPercent: 60,
+            minMessageInterval: 5,
         },
     };
 }
@@ -230,18 +117,6 @@ function getConfigPaths(cwd: string): {
     return { global, configDir, project };
 }
 
-function createDefaultConfig(): void {
-    if (!existsSync(GLOBAL_CONFIG_DIR)) {
-        mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
-    }
-    if (existsSync(GLOBAL_CONFIG_PATH_JSONC) || existsSync(GLOBAL_CONFIG_PATH_JSON)) return;
-    const configContent = `{
-  "$schema": "https://raw.githubusercontent.com/Snowy117/pi-dcp-migrate/master/dcp.schema.json"
-}
-`;
-    writeFileSync(GLOBAL_CONFIG_PATH_JSONC, configContent, "utf-8");
-}
-
 /** Strip JSONC comments and trailing commas without a heavy dependency. */
 function stripJsonComments(input: string): string {
     let out = "";
@@ -291,123 +166,145 @@ function stripJsonComments(input: string): string {
     return out.replace(/,(\s*[}\]])/g, "$1");
 }
 
-function loadConfigFile(configPath: string): Record<string, any> | null {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+/** Fail closed with file path and offending key path; never echoes config file content. */
+function configError(filePath: string, keyPath: string, reason: string): Error {
+    return new Error(
+        `Invalid DCP config: "${keyPath}" ${reason} (file: ${filePath}). ` +
+            "Refusing to load the DCP extension; fix or remove the offending key. " +
+            "Config file content is intentionally not echoed.",
+    );
+}
+
+function loadConfigFile(configPath: string): Record<string, unknown> | null {
     let fileContent: string;
     try {
         fileContent = readFileSync(configPath, "utf-8");
-    } catch {
-        return null;
+    } catch (error) {
+        throw configError(configPath, "(file)", `cannot be read (${errorMessage(error)})`);
     }
+    let parsed: unknown;
     try {
-        const stripped = stripJsonComments(fileContent);
-        const parsed = JSON.parse(stripped);
-        if (parsed === null || parsed === undefined) return null;
-        return parsed as Record<string, any>;
-    } catch {
-        return null;
+        parsed = JSON.parse(stripJsonComments(fileContent));
+    } catch (error) {
+        throw configError(configPath, "(file)", `is not valid JSON/JSONC (${errorMessage(error)})`);
+    }
+    if (parsed === null || parsed === undefined) return null;
+    if (!isPlainObject(parsed)) throw configError(configPath, "(root)", "must be a JSON object");
+    return parsed;
+}
+
+const ROOT_KEYS = new Set(["$schema", "enabled", "debug", "protectedFilePatterns", "compress", "nudge", "audit"]);
+const COMPRESS_KEYS = new Set(["protectedTools", "protectTags", "protectUserMessages"]);
+const NUDGE_KEYS = new Set(["thresholdPercent", "minMessageInterval"]);
+
+function rejectUnknownKeys(
+    filePath: string,
+    data: Record<string, unknown>,
+    allowed: Set<string>,
+    prefix: string,
+): void {
+    for (const key of Object.keys(data)) {
+        if (allowed.has(key)) continue;
+        throw configError(
+            filePath,
+            `${prefix}${key}`,
+            `is not a recognized configuration key; unknown keys are rejected (allowed: ${[...allowed].join(", ")})`,
+        );
     }
 }
 
-function uniq<T>(...arrays: T[][]): T[] {
-    return [...new Set(arrays.flat())];
+function mergeBoolean(filePath: string, keyPath: string, value: unknown): boolean {
+    if (typeof value !== "boolean") throw configError(filePath, keyPath, "must be a boolean");
+    return value;
 }
 
-function mergeCompress(base: CompressConfig, override?: Partial<CompressConfig>): CompressConfig {
-    if (!override) return base;
-    return {
-        mode: override.mode ?? base.mode,
-        permission: override.permission ?? base.permission,
-        showCompression: override.showCompression ?? base.showCompression,
-        summaryBuffer: override.summaryBuffer ?? base.summaryBuffer,
-        maxContextLimit: override.maxContextLimit ?? base.maxContextLimit,
-        minContextLimit: override.minContextLimit ?? base.minContextLimit,
-        modelMaxLimits: override.modelMaxLimits ?? base.modelMaxLimits,
-        modelMinLimits: override.modelMinLimits ?? base.modelMinLimits,
-        nudgeFrequency: override.nudgeFrequency ?? base.nudgeFrequency,
-        iterationNudgeThreshold: override.iterationNudgeThreshold ?? base.iterationNudgeThreshold,
-        nudgeForce: override.nudgeForce ?? base.nudgeForce,
-        protectedTools: uniq(base.protectedTools, override.protectedTools ?? []),
-        protectTags: override.protectTags ?? base.protectTags,
-        protectUserMessages: override.protectUserMessages ?? base.protectUserMessages,
-    };
+/** Deduplicated union merge into the target array (keeps defaults, appends new entries). */
+function mergeStringArray(filePath: string, keyPath: string, target: string[], value: unknown): void {
+    if (!Array.isArray(value)) throw configError(filePath, keyPath, "must be an array of strings");
+    value.forEach((item, index) => {
+        if (typeof item !== "string") throw configError(filePath, `${keyPath}[${index}]`, "must be a string");
+        if (!target.includes(item)) target.push(item);
+    });
 }
 
-function mergeLayer(config: PluginConfig, data: Record<string, any>): PluginConfig {
-    const override = (path: string) => (data as any)[path];
-    return {
-        enabled: data.enabled ?? config.enabled,
-        debug: data.debug ?? config.debug,
-        pruneNotification: data.pruneNotification ?? config.pruneNotification,
-        commands: {
-            enabled: data.commands?.enabled ?? config.commands.enabled,
-            protectedTools: uniq(
-                config.commands.protectedTools,
-                (data.commands?.protectedTools as string[] | undefined) ?? [],
-            ),
-        },
-        manualMode: {
-            enabled: data.manualMode?.enabled ?? config.manualMode.enabled,
-            automaticStrategies:
-                data.manualMode?.automaticStrategies ?? config.manualMode.automaticStrategies,
-        },
-        turnProtection: {
-            enabled: data.turnProtection?.enabled ?? config.turnProtection.enabled,
-            turns: data.turnProtection?.turns ?? config.turnProtection.turns,
-        },
-        experimental: {
-            allowSubAgents: config.experimental.allowSubAgents, // unsupported on pi; ignored
-            customPrompts: data.experimental?.customPrompts ?? config.experimental.customPrompts,
-        },
-        protectedFilePatterns: uniq(
-            config.protectedFilePatterns,
-            (data.protectedFilePatterns as string[] | undefined) ?? [],
-        ),
-        compress: mergeCompress(config.compress, data.compress as Partial<CompressConfig>),
-        strategies: {
-            deduplication: {
-                enabled: data.strategies?.deduplication?.enabled ?? config.strategies.deduplication.enabled,
-                protectedTools: uniq(
-                    config.strategies.deduplication.protectedTools,
-                    (data.strategies?.deduplication?.protectedTools as string[] | undefined) ?? [],
-                ),
-            },
-            purgeErrors: {
-                enabled: data.strategies?.purgeErrors?.enabled ?? config.strategies.purgeErrors.enabled,
-                turns: data.strategies?.purgeErrors?.turns ?? config.strategies.purgeErrors.turns,
-                protectedTools: uniq(
-                    config.strategies.purgeErrors.protectedTools,
-                    (data.strategies?.purgeErrors?.protectedTools as string[] | undefined) ?? [],
-                ),
-            },
-        },
-    };
+function mergeLayer(config: PluginConfig, data: Record<string, unknown>, filePath: string, trusted: boolean): void {
+    rejectUnknownKeys(filePath, data, ROOT_KEYS, "");
+    if ("audit" in data) {
+        if (!trusted) throw configError(filePath, "audit", "is allowed only in global configuration or PI_CONFIG_DIR, not project .pi");
+        if (!isPlainObject(data.audit)) throw configError(filePath, "audit", "must be an object");
+        rejectUnknownKeys(filePath, data.audit, new Set(["enabled", "maxRunBytes"]), "audit.");
+        if ("enabled" in data.audit) config.audit.enabled = mergeBoolean(filePath, "audit.enabled", data.audit.enabled);
+        if ("maxRunBytes" in data.audit) {
+            const value = data.audit.maxRunBytes;
+            if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+                throw configError(filePath, "audit.maxRunBytes", "must be a positive safe integer");
+            }
+            config.audit.maxRunBytes = value;
+        }
+    }
+    if ("$schema" in data && typeof data.$schema !== "string") {
+        throw configError(filePath, "$schema", "must be a string");
+    }
+    if ("enabled" in data) config.enabled = mergeBoolean(filePath, "enabled", data.enabled);
+    if ("debug" in data) config.debug = mergeBoolean(filePath, "debug", data.debug);
+    if ("protectedFilePatterns" in data) {
+        mergeStringArray(filePath, "protectedFilePatterns", config.protectedFilePatterns, data.protectedFilePatterns);
+    }
+    if ("compress" in data) {
+        const compress = data.compress;
+        if (!isPlainObject(compress)) throw configError(filePath, "compress", "must be an object");
+        rejectUnknownKeys(filePath, compress, COMPRESS_KEYS, "compress.");
+        if ("protectedTools" in compress) {
+            mergeStringArray(filePath, "compress.protectedTools", config.compress.protectedTools, compress.protectedTools);
+        }
+        if ("protectTags" in compress) {
+            config.compress.protectTags = mergeBoolean(filePath, "compress.protectTags", compress.protectTags);
+        }
+        if ("protectUserMessages" in compress) {
+            config.compress.protectUserMessages = mergeBoolean(
+                filePath,
+                "compress.protectUserMessages",
+                compress.protectUserMessages,
+            );
+        }
+    }
+    if ("nudge" in data) {
+        const nudge = data.nudge;
+        if (!isPlainObject(nudge)) throw configError(filePath, "nudge", "must be an object");
+        rejectUnknownKeys(filePath, nudge, NUDGE_KEYS, "nudge.");
+        if ("thresholdPercent" in nudge) {
+            const value = nudge.thresholdPercent;
+            if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 100) {
+                throw configError(filePath, "nudge.thresholdPercent", "must be a finite number with 0 < value < 100");
+            }
+            config.nudge.thresholdPercent = value;
+        }
+        if ("minMessageInterval" in nudge) {
+            const value = nudge.minMessageInterval;
+            if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+                throw configError(filePath, "nudge.minMessageInterval", "must be a positive integer");
+            }
+            config.nudge.minMessageInterval = value;
+        }
+    }
 }
 
 export function getConfig(cwd: string): PluginConfig {
-    let config = deepCloneConfig(defaultConfig);
+    const config = createDefaultConfig();
     const paths = getConfigPaths(cwd);
-
-    if (!paths.global) {
-        createDefaultConfig();
-    }
-
-    const layers = [paths.global, paths.configDir, paths.project];
-    for (const path of layers) {
+    for (const [path, trusted] of [[paths.global, true], [paths.configDir, true], [paths.project, false]] as const) {
         if (!path) continue;
         const data = loadConfigFile(path);
         if (!data) continue;
-        config = mergeLayer(config, data);
+        mergeLayer(config, data, path, trusted);
     }
-
-    config.compress.nudgeFrequency = Math.max(1, Math.floor(config.compress.nudgeFrequency || 1));
-    config.compress.iterationNudgeThreshold = Math.max(
-        1,
-        Math.floor(config.compress.iterationNudgeThreshold || 1),
-    );
-    config.strategies.purgeErrors.turns = Math.max(1, Math.floor(config.strategies.purgeErrors.turns || 1));
-    config.turnProtection.turns = Math.max(1, Math.floor(config.turnProtection.turns || 1));
-
     return config;
 }
-
-export const CONFIG_DIR = GLOBAL_CONFIG_DIR;

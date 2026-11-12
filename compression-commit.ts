@@ -59,9 +59,6 @@ export function commitCompression(
     stored.activeByAnchorMessageId.set(materialized.anchorMessageId, blockId);
     deactivateConsumedBlocks(state, consumed, blockId);
     block.compressedTokens = indexCompressedMessages(state, plan, messageIds, blockId);
-    state.stats.pruneTokenCounter += block.compressedTokens;
-    state.stats.totalPruneTokens += state.stats.pruneTokenCounter;
-    state.stats.pruneTokenCounter = 0;
     return { blockId, compressedMessages: plan.selection.messageIds.length };
 }
 

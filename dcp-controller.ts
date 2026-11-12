@@ -7,14 +7,12 @@ import { resetOnCompaction } from "./compression-state.ts";
 import { injectCompressNudges } from "./context-nudges.ts";
 import {
     injectMessageIdTags,
-    messageHasCompress,
     pruneMessages,
     stripHallucinations,
 } from "./context-render.ts";
-import { isIgnoredUserMessage, type DcpMessage } from "./conversation.ts";
 import { Logger } from "./logger.ts";
 import { saveSessionState } from "./persistence.ts";
-import { buildProtectedToolsExtension, PromptStore, renderSystemPrompt } from "./prompts.ts";
+import { buildProtectedToolsExtension, renderSystemPrompt, RUNTIME_PROMPTS } from "./prompts.ts";
 import {
     buildCanonicalConversation,
     conversationFromContext,
@@ -23,16 +21,21 @@ import {
     sessionKeyFor,
 } from "./session-runtime.ts";
 import { createSessionState, resetSessionState, type SessionState } from "./types.ts";
+import { createAuditRecorder } from "./audit-storage.ts";
+import { auditSnapshot, diffAuditProjection } from "./audit-projection.ts";
+import { observeAudit, type AuditRecorder, type AuditProjectionTrace } from "./audit-types.ts";
 
 interface DcpRuntime {
     config: PluginConfig;
     logger: Logger;
     state: SessionState;
-    prompts: PromptStore;
+    audit?: AuditRecorder;
 }
 
 export class DcpController {
     private readonly runtime: DcpRuntime;
+    private contextPass = 0;
+    private auditNotify: ((message: string) => void) | undefined;
 
     constructor(private readonly pi: ExtensionAPI, cwd = process.cwd()) {
         const config = getConfig(cwd);
@@ -41,45 +44,43 @@ export class DcpController {
             config,
             logger,
             state: createSessionState(),
-            prompts: new PromptStore(logger, config.experimental.customPrompts),
         };
     }
 
     install(): void {
-        const { config, logger, state, prompts } = this.runtime;
+        const { config, logger, state } = this.runtime;
         if (!config.enabled) return;
-        registerCompressTool({ pi: this.pi, state, config, logger, prompts: () => prompts.getRuntimePrompts() });
-        registerCommands({
-            pi: this.pi,
-            state,
-            config,
-            logger,
-            getSessionKey: () => state.sessionKey ?? "inmemory",
-            onManualCompress: (focus) => this.triggerManualCompress(focus),
-        });
+        this.runtime.audit = createAuditRecorder({ config: config.audit,
+            warn: (message) => { if (this.auditNotify) this.auditNotify(message); else console.error(message); } });
+        registerCompressTool({ pi: this.pi, state, config, logger, audit: this.runtime.audit, prompts: () => RUNTIME_PROMPTS });
+        registerCommands({ pi: this.pi });
         this.pi.on("context", (event, ctx) => this.processContext(event.messages, ctx));
         this.pi.on("before_agent_start", (event) => this.processBeforeAgentStart(event.systemPrompt));
         this.pi.on("message_end", (event) => this.stripAssistantMetadata(event.message));
-        this.pi.on("session_start", async (_event, ctx) => this.startSession(ctx));
-        this.pi.on("model_select", (event) => { state.modelContextLimit = event.model.contextWindow; });
-        this.pi.on("session_compact", () => this.handleCompaction());
-        this.pi.on("session_tree", () => logger.debug("Tree navigation; DCP state will reconcile on next context event"));
-        this.pi.on("session_shutdown", () => {
-            if (state.sessionKey) saveSessionState(state, logger).catch(() => {});
+        this.pi.on("session_start", async (event, ctx) => {
+            await this.startSession(ctx);
+            await this.recordLifecycle(ctx, event.type, { reason: event.reason, previousSessionFile: event.previousSessionFile });
         });
-    }
-
-    private triggerManualCompress(focus: string): void {
-        const { state, config } = this.runtime;
-        if (config.compress.permission === "deny") {
-            this.pi.sendUserMessage("[DCP] Compress tool is disabled (compress.permission=deny). Manual compression unavailable.");
-            return;
-        }
-        state.manualMode = "compress-pending";
-        const body = focus
-            ? `[Manual compression requested: ${focus}]\n(dcp-compress-triggered-manually)`
-            : "[Manual compression requested]\n(dcp-compress-triggered-manually)";
-        this.pi.sendUserMessage(body);
+        this.pi.on("model_select", (event) => { state.modelContextLimit = event.model.contextWindow; });
+        this.pi.on("session_compact", async (event, ctx) => {
+            this.handleCompaction();
+            await this.recordLifecycle(ctx, event.type, { reason: event.reason, compactionEntryId: event.compactionEntry.id });
+        });
+        this.pi.on("session_tree", async (event, ctx) => {
+            logger.debug("Tree navigation; DCP state will reconcile on next context event");
+            await this.recordLifecycle(ctx, event.type, { newLeafId: event.newLeafId, oldLeafId: event.oldLeafId });
+        });
+        this.pi.on("session_before_fork", async (event, ctx) => {
+            await this.recordLifecycle(ctx, event.type, { entryId: event.entryId, position: event.position });
+        });
+        this.pi.on("session_before_switch", async (event, ctx) => {
+            await this.recordLifecycle(ctx, event.type, { reason: event.reason, targetSessionFile: event.targetSessionFile });
+        });
+        this.pi.on("session_shutdown", async (event, ctx) => {
+            if (state.sessionKey) void saveSessionState(state, logger);
+            await this.recordLifecycle(ctx, event.type, { reason: event.reason, targetSessionFile: event.targetSessionFile });
+            await this.runtime.audit?.flush();
+        });
     }
 
     private async processContext(
@@ -94,26 +95,67 @@ export class DcpController {
         if (state.sessionKey !== key) {
             resetSessionState(state);
             state.sessionKey = key;
-            state.manualMode = config.manualMode.enabled ? "active" : false;
         }
-        reconcileConversation(state, config, logger, canonical);
-        const rendered = pruneMessages(state, logger, messages);
-        if (this.permission() !== "deny" && !state.manualMode) {
-            injectCompressNudges(state, config, logger, rendered, this.runtime.prompts.getRuntimePrompts());
+        reconcileConversation(state, logger, canonical);
+        const audit = this.prepareAudit(ctx);
+        const pass = ++this.contextPass;
+        const trace: AuditProjectionTrace[] | undefined = audit?.active ? [] : undefined;
+        const before = audit?.active && state.prune.messages.activeBlockIds.size
+            ? this.freezeAudit(() => auditSnapshot(messages)) : undefined;
+        const rendered = pruneMessages(state, logger, messages, trace);
+        const projection = before ? this.freezeAudit(() => auditSnapshot(rendered, trace)) : undefined;
+        injectCompressNudges(state, config, logger, rendered, RUNTIME_PROMPTS);
+        injectMessageIdTags(state, rendered);
+        if (audit?.active) {
+            this.freezeAudit(() => {
+                const meta = { contextPassId: pass, messageRefs: [...state.messageIds.byRawId],
+                    activeBlocks: [...state.prune.messages.activeBlockIds].map((id) => {
+                        const block = state.prune.messages.blocksById.get(id)!;
+                        return { blockId: id, compressCallId: block.compressCallId ?? null,
+                            compressMessageId: block.compressMessageId, anchorMessageId: block.anchorMessageId };
+                    }), inputCount: messages.length, outputCount: rendered.length };
+                if (before && projection && trace) {
+                    const output = auditSnapshot(rendered, trace);
+                    // 这两个调用之间只有本扩展原有的提醒/ID 注入；不从正文标题猜来源。
+                    const annotations = projection.entries.flatMap((entry, ordinal) => entry.sha256 !== output.entries[ordinal]?.sha256
+                        ? [{ ordinal, kind: "reminder-or-message-id" as const }] : []);
+                    const diff = diffAuditProjection(before, projection, output, trace, annotations);
+                    audit.context({ meta, before, projection, output, trace, annotations, diff }, pass);
+                } else audit.context({ meta }, pass);
+            });
+            await audit.flush();
         }
-        if (this.permission() !== "deny") injectMessageIdTags(state, config, rendered);
-        this.applyManualTrigger(rendered);
         return { messages: rendered.map((entry) => entry.message) };
     }
 
+    private prepareAudit(ctx: ExtensionContext): AuditRecorder | undefined {
+        const audit = this.runtime.audit;
+        if (!audit) return;
+        this.auditNotify = (message) => ctx.ui.notify(message, "warning");
+        audit.setIdentity({ sessionId: ctx.sessionManager.getSessionId(), sessionKey: sessionKeyFor(ctx),
+            sessionFile: ctx.sessionManager.getSessionFile() ?? null,
+            parentSession: ctx.sessionManager.getHeader()?.parentSession ?? null,
+            leafId: ctx.sessionManager.getLeafId() });
+        return audit;
+    }
+
+    private freezeAudit<T>(read: () => T): T | undefined {
+        try { return read(); }
+        catch (error) { this.runtime.audit?.pause("serialization", error, this.contextPass); return undefined; }
+    }
+
+    private async recordLifecycle(ctx: ExtensionContext, event: string, details: unknown): Promise<void> {
+        const audit = this.prepareAudit(ctx);
+        observeAudit(audit, "lifecycle", () => ({ event, details }));
+        await audit?.flush();
+    }
+
     private processBeforeAgentStart(systemPrompt: string): { systemPrompt: string } | void {
-        if (this.permission() === "deny" || isInternalAgent(systemPrompt)) return;
-        const { state, config, prompts } = this.runtime;
-        prompts.reload();
+        if (isInternalAgent(systemPrompt)) return;
+        const { config } = this.runtime;
         const extension = renderSystemPrompt(
-            prompts.getRuntimePrompts(),
+            RUNTIME_PROMPTS,
             buildProtectedToolsExtension(config.compress.protectedTools),
-            !!state.manualMode,
         );
         return extension ? { systemPrompt: `${systemPrompt}\n\n${extension}` } : undefined;
     }
@@ -132,14 +174,12 @@ export class DcpController {
     }
 
     private async startSession(ctx: ExtensionContext): Promise<void> {
-        const { state, config, logger } = this.runtime;
+        const { state, logger } = this.runtime;
         const key = sessionKeyFor(ctx);
         if (state.sessionKey !== key) {
             resetSessionState(state);
             state.sessionKey = key;
-            state.manualMode = config.manualMode.enabled ? "active" : false;
             await loadStateForSession(state, ctx, logger);
-            if (config.manualMode.enabled && !state.manualMode) state.manualMode = "active";
         }
         if (ctx.model?.contextWindow) state.modelContextLimit = ctx.model.contextWindow;
     }
@@ -149,26 +189,6 @@ export class DcpController {
         this.runtime.state.lastCompaction = Date.now();
         this.runtime.logger.info("Compaction detected via session_compact event; reset DCP state");
     }
-
-    private permission(): "ask" | "allow" | "deny" {
-        return this.runtime.state.compressPermission ?? this.runtime.config.compress.permission;
-    }
-
-    private applyManualTrigger(messages: DcpMessage[]): void {
-        const { state, config } = this.runtime;
-        if (state.manualMode !== "compress-pending" || config.compress.permission === "deny") return;
-        const assistant = [...messages].reverse().find((entry) => entry.message.role === "assistant");
-        if (assistant && messageHasCompress(assistant)) {
-            state.manualMode = "active";
-            return;
-        }
-        for (let index = messages.length - 1; index >= 0; index--) {
-            const entry = messages[index]!;
-            if (entry.message.role !== "user" || isIgnoredUserMessage(entry)) continue;
-            appendToUser(entry.message, "(dcp-compress-triggered-manually)");
-            break;
-        }
-    }
 }
 
 const INTERNAL_AGENT_SIGNATURES = ["you are a context summarization assistant"];
@@ -177,19 +197,3 @@ function isInternalAgent(systemPrompt: string): boolean {
     const lower = systemPrompt.toLowerCase();
     return INTERNAL_AGENT_SIGNATURES.some((signature) => lower.includes(signature));
 }
-
-function appendToUser(message: AgentMessage, injection: string): void {
-    if (message.role !== "user") return;
-    if (typeof message.content === "string") {
-        if (!message.content.includes(injection)) message.content = `${message.content.replace(/\n*$/, "")}\n\n${injection}`;
-        return;
-    }
-    if (!Array.isArray(message.content)) return;
-    const text = [...message.content].reverse().find((block) => block.type === "text" && typeof block.text === "string");
-    if (text?.type === "text") {
-        if (!text.text.includes(injection)) text.text = `${text.text.replace(/\n*$/, "")}\n\n${injection}`;
-    } else {
-        message.content.push({ type: "text", text: injection });
-    }
-}
-

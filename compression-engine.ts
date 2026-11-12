@@ -10,15 +10,14 @@ import {
     validateNonOverlapping,
     type RangePlan,
 } from "./compression-planner.ts";
-import { materializePlan, restoreSummary } from "./compression-summary.ts";
+import { materializePlan } from "./compression-summary.ts";
 import type {
     CompressionRuntime,
-    MessageCompressArgs,
     NotifyFn,
     RangeCompressArgs,
 } from "./compression-types.ts";
-import { isProtectedUserMessage } from "./context-render.ts";
-import { parseBoundaryId, type DcpMessage } from "./conversation.ts";
+import type { DcpMessage } from "./conversation.ts";
+import { observeAudit } from "./audit-types.ts";
 
 export function runRangeCompress(
     runtime: CompressionRuntime,
@@ -46,49 +45,11 @@ export function runRangeCompress(
             sources: [{ summary: entry.summary, rawIndex: start.rawIndex, inputIndex: index }],
         };
     });
-    const result = compressPlans(runtime, messages, requested, args.topic, "range", toolCallId);
-    notifyCompression(runtime, notify, args.topic, result.blockIds, result.total);
+    observeAudit(runtime.audit, "requested", () => ({ compressCallId: toolCallId,
+        phase: "resolved-selections", plans: requested.map(auditPlan) }));
+    const result = compressPlans(runtime, messages, requested, args.topic, toolCallId);
+    notifyCompression(notify, result.blockIds, result.total);
     return `Compressed ${result.total} messages into ${result.blockIds.length} ${result.blockIds.length === 1 ? "block" : "blocks"} (${result.blockIds.map((id) => `b${id}`).join(", ")}).`;
-}
-
-export function runMessageCompress(
-    runtime: CompressionRuntime,
-    args: MessageCompressArgs,
-    messages: DcpMessage[],
-    toolCallId: string,
-    notify: NotifyFn,
-): string {
-    if (typeof args.topic !== "string" || !args.topic.trim()) throw new Error("topic is required");
-    if (!Array.isArray(args.content) || !args.content.length) throw new Error("content is required");
-    const search = buildSearchContext(runtime.state, messages);
-    const requested = args.content.map((entry, index): RangePlan | null => {
-        if (typeof entry.messageId !== "string" || !entry.messageId.trim()) throw new Error(`content[${index}].messageId is required`);
-        if (typeof entry.summary !== "string" || !entry.summary.trim()) throw new Error(`content[${index}].summary is required`);
-        const parsed = parseBoundaryId(entry.messageId.trim());
-        if (!parsed || parsed.kind !== "message") throw new Error(`content[${index}].messageId must be a message ID (mNNNN)`);
-        const start = resolveBoundary(search, runtime.state, parsed.ref);
-        const selection = resolveSelection(search, start, { ...start });
-        if (selection.messageIds.length !== 1) throw new Error(`content[${index}] resolves to ${selection.messageIds.length} messages; message mode requires exactly one`);
-        const selected = search.byEntryId.get(selection.messageIds[0]!)!;
-        if (isProtectedUserMessage(runtime.config, selected)) return null;
-        return {
-            selection,
-            anchor: resolveAnchorMessageId(start),
-            label: entry.messageId,
-            start,
-            end: { ...start },
-            sources: [{ summary: entry.summary, rawIndex: start.rawIndex, inputIndex: index, topic: entry.topic || args.topic }],
-        };
-    }).filter((plan): plan is RangePlan => plan !== null);
-    if (!requested.length) {
-        notifyCompression(runtime, notify, args.topic, [], 0);
-        return "No messages were compressible (they may be protected).";
-    }
-    const result = compressPlans(runtime, messages, requested, args.topic, "message", toolCallId);
-    notifyCompression(runtime, notify, args.topic, result.blockIds, result.total);
-    return result.total === 0
-        ? "No messages were compressible (they may be protected)."
-        : `Compressed ${result.total} messages into ${result.blockIds.length} ${result.blockIds.length === 1 ? "block" : "blocks"}.`;
 }
 
 function compressPlans(
@@ -96,12 +57,19 @@ function compressPlans(
     messages: DcpMessage[],
     requested: RangePlan[],
     batchTopic: string,
-    mode: "range" | "message",
     toolCallId: string,
 ): { total: number; blockIds: number[] } {
     validateNonOverlapping(requested);
     const search = buildSearchContext(runtime.state, messages);
     const plans = mergeExpandedRangePlans(runtime.state, search, requested);
+    observeAudit(runtime.audit, "plans", () => ({ compressCallId: toolCallId,
+        phase: "expanded-and-merged", plans: plans.map((plan) => {
+            const sourceInputIndices = plan.sources.map((source) => source.inputIndex);
+            const originals = new Set(requested.filter((_item, index) => sourceInputIndices.includes(index))
+                .flatMap((item) => item.selection.messageIds));
+            return { ...auditPlan(plan), sourceInputIndices,
+                expansionMessageIds: plan.selection.messageIds.filter((id) => !originals.has(id)) };
+        }) }));
     for (const plan of plans) validateCompleteToolTransactions(search, effectiveSelectionMessageIds(runtime.state, plan.selection));
     const runId = allocateRunId(runtime.state);
     const compressMessageId = findCompressMessageId(messages, toolCallId);
@@ -110,11 +78,18 @@ function compressPlans(
     for (const plan of plans) {
         const blockId = allocateBlockId(runtime.state);
         const materialized = materializePlan(runtime, search, plan, blockId, batchTopic);
-        const committed = commitCompression(runtime.state, plan, materialized, runId, blockId, mode, batchTopic, compressMessageId, toolCallId);
+        const committed = commitCompression(runtime.state, plan, materialized, runId, blockId, "range", batchTopic, compressMessageId, toolCallId);
+        observeAudit(runtime.audit, "commit", () => ({ compressCallId: toolCallId, phase: "in-memory-only",
+            block: runtime.state.prune.messages.blocksById.get(committed.blockId) }));
         total += committed.compressedMessages;
         blockIds.push(committed.blockId);
     }
     return { total, blockIds };
+}
+
+function auditPlan(plan: RangePlan) {
+    return { label: plan.label, start: plan.start, end: plan.end, anchor: plan.anchor, sources: plan.sources,
+        selection: { ...plan.selection, messageTokenById: [...plan.selection.messageTokenById] } };
 }
 
 function findCompressMessageId(messages: DcpMessage[], toolCallId: string): string {
@@ -122,18 +97,7 @@ function findCompressMessageId(messages: DcpMessage[], toolCallId: string): stri
     return owner?.id ?? messages[messages.length - 1]?.id ?? "";
 }
 
-function notifyCompression(runtime: CompressionRuntime, notify: NotifyFn, topic: string, blockIds: number[], total: number): void {
-    if (runtime.config.pruneNotification === "off" || !blockIds.length) return;
-    if (runtime.config.pruneNotification === "minimal") {
-        notify(`Compressed ${total} messages (${blockIds.map((id) => `b${id}`).join(", ")})`, "info");
-        return;
-    }
-    const lines = [`Compressed ${total} messages into ${blockIds.length} block(s): ${topic}`];
-    if (runtime.config.compress.showCompression) {
-        for (const id of blockIds) {
-            const block = runtime.state.prune.messages.blocksById.get(id);
-            if (block) lines.push(restoreSummary(block.summary).slice(0, 500));
-        }
-    }
-    notify(lines.join("\n"), "info");
+function notifyCompression(notify: NotifyFn, blockIds: number[], total: number): void {
+    if (!blockIds.length) return;
+    notify(`Compressed ${total} messages (${blockIds.map((id) => `b${id}`).join(", ")})`, "info");
 }

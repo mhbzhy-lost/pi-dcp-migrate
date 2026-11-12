@@ -1,7 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import type { Logger } from "./logger.ts";
+/**
+ * Fixed runtime prompts.
+ *
+ * The extension ships exactly one system guidance block, one compress-tool
+ * description and one soft context nudge. There is no PromptStore, no file
+ * override, generation or hot-reload: prompt behaviour is fully determined by
+ * the code below and the model's own decisions.
+ */
 
 export const SYSTEM_PROMPT = `
 You operate in a context-constrained environment. Manage context continuously to avoid buildup and preserve retrieval quality. Efficient context management is paramount for your agentic performance.
@@ -96,70 +100,22 @@ Tool transactions are atomic. If a selected range contains only one side, the to
 When multiple independent ranges are ready and their boundaries do not overlap, include all of them as separate entries in the \`content\` array of a single tool call. Each entry should have its own \`startId\`, \`endId\`, and \`summary\`.
 `;
 
-export const COMPRESS_MESSAGE_PROMPT = `Compress individual raw messages into detailed summaries.
+/**
+ * The single soft reminder. It never forces a compress call: it only nudges the
+ * model to evaluate closed ranges when approximate context pressure crosses the
+ * configured threshold. The model may ignore it and continue working.
+ */
+export const CONTEXT_NUDGE = `(dcp-system-reminder
+Context pressure is growing in this session.
 
-THE SUMMARY
-Your summary must be EXHAUSTIVE. Capture file paths, function signatures, decisions made, constraints discovered, key findings... EVERYTHING that maintains context integrity.
+Take a moment to evaluate the conversation for compressible ranges:
+- If a section is genuinely closed (research concluded, implementation finished, exploration exhausted) and its raw content is unlikely to be needed for the immediate next steps, use the compress tool on it now, in one deliberate pass.
+- Batch closed content into a single compress call instead of compressing small fragments repeatedly.
+- Keep active working context uncompressed. Do not compress content you still need verbatim.
 
-USER INTENT FIDELITY
-Preserve the user's intent with extra care. Directly quote short user messages when they best preserve exact meaning.
+Your summary must preserve user intent exactly and carry all precise technical state (file paths, signatures, decisions, constraints, key findings) so work continues without re-exploration. If you are unsure about a detail, say so in the summary instead of presenting it as original fact.
 
-BOUNDARY IDS
-\`mNNNN\` IDs identify raw messages.
-Pick \`messageId\` directly from injected IDs visible in context. Do not invent IDs.
-
-BATCHING
-TOOL CALL ATOMICITY
-Tool transactions are atomic. Selecting either an assistant tool-call message or a tool result automatically includes both sides, including all sibling results from the same assistant message. Automatic expansion uses the complete contiguous span between those messages. Write the summary so it faithfully covers every message in that expanded span, not only the submitted message.
-
-Include one or more messages as separate entries in the \`content\` array of a single tool call.
-`;
-
-export const CONTEXT_LIMIT_NUDGE = `(dcp-system-reminder
-CRITICAL WARNING: MAX CONTEXT LIMIT REACHED
-
-You are at or beyond the configured max context threshold. This is an emergency context-recovery moment.
-
-You MUST use the \`compress\` tool now. Do not continue normal exploration until compression is handled.
-
-If you are in the middle of a critical atomic operation, finish that atomic step first, then compress immediately.
-
-SELECTION PROCESS
-Start from older, resolved history and capture as much stale context as safely possible in one pass.
-Avoid the newest active working messages unless it is clearly closed.
-
-SUMMARY REQUIREMENTS
-Your summary MUST cover all essential details from the selected messages so work can continue.
-If the compressed range includes user messages, preserve user intent exactly. Prefer direct quotes for short user messages to avoid semantic drift.
-)
-`;
-
-export const TURN_NUDGE = `(dcp-system-reminder
-Evaluate the conversation for compressible ranges.
-
-If any messages are cleanly closed and unlikely to be needed again, use the compress tool on them.
-If direction has shifted, compress earlier ranges that are now less relevant.
-
-The goal is to filter noise and distill key information so context accumulation stays under control.
-Keep active context uncompressed.
-)
-`;
-
-export const ITERATION_NUDGE = `(dcp-system-reminder
-You've been iterating for a while after the last user message.
-
-If there is a closed portion that is unlikely to be referenced immediately (for example, finished research before implementation), use the compress tool on it now.
-)
-`;
-
-export const MANUAL_MODE_SYSTEM_EXTENSION = `(dcp-system-reminder
-Manual mode is enabled. Do NOT use compress unless the user has explicitly triggered it through a manual marker.
-
-Only use the compress tool after seeing \`(dcp-compress-triggered-manually)\` in the current user instruction context.
-
-Issue exactly ONE compress tool per manual trigger. Do NOT launch multiple compress tools in parallel. Each trigger grants a single compression; after it completes, wait for the next trigger.
-
-After completing a manually triggered context-management action, STOP IMMEDIATELY. Do NOT continue with any task execution. End your response right after the tool use completes and wait for the next user input.
+This is a soft reminder. If nothing is safely closable yet, continue your current work and compress later.
 )
 `;
 
@@ -176,31 +132,22 @@ Do not include their content in compress tool summaries — the environment reta
 export interface RuntimePrompts {
     system: string;
     compressRange: string;
-    compressMessage: string;
-    contextLimitNudge: string;
-    turnNudge: string;
-    iterationNudge: string;
-    manualExtension: string;
+    contextNudge: string;
 }
 
-const BUNDLED: RuntimePrompts = {
+/** The one fixed prompt set. No overrides, no hot reload. */
+export const RUNTIME_PROMPTS: RuntimePrompts = {
     system: SYSTEM_PROMPT,
     compressRange: COMPRESS_RANGE_PROMPT,
-    compressMessage: COMPRESS_MESSAGE_PROMPT,
-    contextLimitNudge: CONTEXT_LIMIT_NUDGE,
-    turnNudge: TURN_NUDGE,
-    iterationNudge: ITERATION_NUDGE,
-    manualExtension: MANUAL_MODE_SYSTEM_EXTENSION,
+    contextNudge: CONTEXT_NUDGE,
 };
 
 export function renderSystemPrompt(
     prompts: RuntimePrompts,
     protectedToolsExtension?: string,
-    manual?: boolean,
 ): string {
     const extensions: string[] = [];
     if (protectedToolsExtension) extensions.push(protectedToolsExtension.trim());
-    if (manual) extensions.push(prompts.manualExtension.trim());
     return [prompts.system.trim(), ...extensions]
         .filter(Boolean)
         .join("\n\n")
@@ -223,99 +170,3 @@ THE FORMAT OF COMPRESS
   ]
 }
 \`\`\``;
-
-export const MESSAGE_FORMAT_EXTENSION = `
-THE FORMAT OF COMPRESS
-
-\`\`\`
-{
-  topic: string,           // Short label (3-5 words) for the overall batch
-  content: [               // One or more messages to compress independently
-    {
-      messageId: string,   // Raw message ID only: mNNNN
-      topic: string,       // Short label (3-5 words) for this one message summary
-      summary: string      // Complete summary replacing that message and any automatically included transaction span
-    }
-  ]
-}
-\`\`\``;
-
-type EditableField = "system" | "compressRange" | "compressMessage" | "contextLimitNudge" | "turnNudge" | "iterationNudge";
-
-const PROMPT_FILES: Array<{ field: EditableField; file: string }> = [
-    { field: "system", file: "system.md" },
-    { field: "compressRange", file: "compress-range.md" },
-    { field: "compressMessage", file: "compress-message.md" },
-    { field: "contextLimitNudge", file: "context-limit-nudge.md" },
-    { field: "turnNudge", file: "turn-nudge.md" },
-    { field: "iterationNudge", file: "iteration-nudge.md" },
-];
-
-const HTML_COMMENT_REGEX = /<!--[\s\S]*?-->/g;
-
-function stripPromptComments(content: string): string {
-    return content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").replace(HTML_COMMENT_REGEX, "").trim();
-}
-
-function resolvePromptDirs(): { defaultsDir: string; overridesDir: string } {
-    const root = process.env.XDG_CONFIG_HOME
-        ? join(process.env.XDG_CONFIG_HOME, "pi", "dcp-prompts")
-        : join(homedir(), ".config", "pi", "dcp-prompts");
-    return { defaultsDir: join(root, "defaults"), overridesDir: join(root, "overrides") };
-}
-
-export class PromptStore {
-    private prompts: RuntimePrompts;
-    private readonly dirs = resolvePromptDirs();
-
-    constructor(
-        private readonly logger: Logger,
-        private readonly customPromptsEnabled: boolean,
-    ) {
-        this.prompts = { ...BUNDLED };
-        if (this.customPromptsEnabled) this.ensureDefaultFiles();
-        this.reload();
-    }
-
-    getRuntimePrompts(): RuntimePrompts {
-        return { ...this.prompts };
-    }
-
-    reload(): void {
-        const next = { ...BUNDLED };
-        if (!this.customPromptsEnabled) {
-            this.prompts = next;
-            return;
-        }
-        for (const { field, file } of PROMPT_FILES) {
-            const overridePath = join(this.dirs.overridesDir, file);
-            if (!existsSync(overridePath)) continue;
-            try {
-                const raw = readFileSync(overridePath, "utf-8");
-                const cleaned = stripPromptComments(raw);
-                if (cleaned) next[field] = cleaned;
-            } catch {
-                this.logger.warn("Failed to read prompt override", { file });
-            }
-        }
-        this.prompts = next;
-    }
-
-    private ensureDefaultFiles(): void {
-        try {
-            mkdirSync(this.dirs.defaultsDir, { recursive: true });
-            mkdirSync(this.dirs.overridesDir, { recursive: true });
-        } catch {
-            return;
-        }
-        for (const { field, file } of PROMPT_FILES) {
-            const content = `${BUNDLED[field].trim()}\n`;
-            const filePath = join(this.dirs.defaultsDir, file);
-            try {
-                const existing = existsSync(filePath) ? readFileSync(filePath, "utf-8") : null;
-                if (existing !== content) writeFileSync(filePath, content, "utf-8");
-            } catch {
-            }
-        }
-    }
-}

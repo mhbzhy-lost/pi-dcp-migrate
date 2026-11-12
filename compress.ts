@@ -1,10 +1,11 @@
 import { Type, type Static } from "typebox";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runMessageCompress, runRangeCompress } from "./compression-engine.ts";
+import { runRangeCompress } from "./compression-engine.ts";
 import type { CompressContext, NotifyFn } from "./compression-types.ts";
-import { MESSAGE_FORMAT_EXTENSION, RANGE_FORMAT_EXTENSION } from "./prompts.ts";
-import { buildConversationForTool, loadStateForSession, reconcileConversation, sessionKeyFor } from "./session-runtime.ts";
+import { RANGE_FORMAT_EXTENSION } from "./prompts.ts";
+import { buildConversationForTool, reconcileConversation, sessionKeyFor } from "./session-runtime.ts";
 import { saveSessionState } from "./persistence.ts";
+import { observeAudit } from "./audit-types.ts";
 
 const RangeSchema = Type.Object({
     topic: Type.String({ description: "Short label (3-5 words) for display - e.g., 'Auth System Exploration'" }),
@@ -15,53 +16,48 @@ const RangeSchema = Type.Object({
     }), { description: "One or more ranges to compress, each with start/end boundaries and a summary" }),
 });
 
-const MessageSchema = Type.Object({
-    topic: Type.String({ description: "Short label (3-5 words) for the overall batch" }),
-    content: Type.Array(Type.Object({
-        messageId: Type.String({ description: "Raw message ID only: mNNNN" }),
-        topic: Type.String({ description: "Short label (3-5 words) for this one message summary" }),
-        summary: Type.String({ description: "Complete technical summary replacing that one message" }),
-    })),
-});
-
 export function registerCompressTool(ctx: CompressContext): void {
-    if (ctx.config.compress.permission === "deny") return;
-    const messageMode = ctx.config.compress.mode === "message";
     const prompts = ctx.prompts();
     ctx.pi.registerTool({
         name: "compress",
         label: "Compress",
-        description: (messageMode ? prompts.compressMessage : prompts.compressRange) +
-            (messageMode ? MESSAGE_FORMAT_EXTENSION : RANGE_FORMAT_EXTENSION),
+        description: prompts.compressRange + RANGE_FORMAT_EXTENSION,
         promptSnippet: "Replace stale conversation ranges with technical summaries",
-        parameters: messageMode ? MessageSchema : RangeSchema,
+        parameters: RangeSchema,
         async execute(toolCallId, params, _signal, _onUpdate, execCtx) {
-            assertManualPermission(ctx);
+            const audit = ctx.audit;
+            audit?.setIdentity({ sessionId: execCtx.sessionManager.getSessionId(), sessionKey: sessionKeyFor(execCtx),
+                sessionFile: execCtx.sessionManager.getSessionFile() ?? null,
+                parentSession: execCtx.sessionManager.getHeader()?.parentSession ?? null,
+                leafId: execCtx.sessionManager.getLeafId() });
+            observeAudit(audit, "request", () => ({ compressCallId: toolCallId, args: params }));
+            try {
             const messages = await buildConversationForTool(execCtx);
             ensureToolSession(ctx, execCtx, messages);
+            observeAudit(audit, "requested", () => ({ compressCallId: toolCallId,
+                phase: "identity-map", messageRefs: [...ctx.state.messageIds.byRawId] }));
             const notify: NotifyFn = (message, type) => execCtx.ui.notify(message, type);
-            const result = messageMode
-                ? runMessageCompress(ctx, params as Static<typeof MessageSchema>, messages, toolCallId, notify)
-                : runRangeCompress(ctx, params as Static<typeof RangeSchema>, messages, toolCallId, notify);
-            ctx.state.manualMode = ctx.state.manualMode ? "active" : false;
+            const result = runRangeCompress(ctx, params as Static<typeof RangeSchema>, messages, toolCallId, notify);
             await saveSessionState(ctx.state, ctx.logger);
+            observeAudit(audit, "tool-complete", () => ({ compressCallId: toolCallId, result,
+                note: "内存提交已完成；sidecar 自行处理写入错误，此事件不证明持久化或后续应用。" }));
             return { content: [{ type: "text", text: result }], details: {} };
+            } catch (error) {
+                observeAudit(audit, "tool-error", () => ({ compressCallId: toolCallId,
+                    error: error instanceof Error ? error.message : String(error),
+                    note: "之前的 commit 事件仍有效；本事件不表示回滚。" }));
+                throw error;
+            } finally { await audit?.flush(); }
         },
     });
 }
 
-function assertManualPermission(ctx: CompressContext): void {
-    if (ctx.state.manualMode && ctx.state.manualMode !== "compress-pending") {
-        throw new Error("Manual mode: compress blocked. Do not retry until `(dcp-compress-triggered-manually)` appears in user context.");
-    }
-}
-
-function ensureToolSession(ctx: CompressContext, execCtx: ExtensionContext, messages: Parameters<typeof reconcileConversation>[3]): void {
+function ensureToolSession(ctx: CompressContext, execCtx: ExtensionContext, messages: Parameters<typeof reconcileConversation>[2]): void {
     ctx.state.sessionKey = sessionKeyFor(execCtx);
-    reconcileConversation(ctx.state, ctx.config, ctx.logger, messages);
+    reconcileConversation(ctx.state, ctx.logger, messages);
 }
 
-export { runMessageCompress, runRangeCompress } from "./compression-engine.ts";
+export { runRangeCompress } from "./compression-engine.ts";
 export {
     expandToolTransactionSelection,
     mergeExpandedRangePlans,

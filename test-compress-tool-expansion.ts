@@ -7,7 +7,7 @@ import {
     type SearchContext,
     type Selection,
 } from "./compression-planner.ts";
-import { runMessageCompress, runRangeCompress } from "./compression-engine.ts";
+import { runRangeCompress } from "./compression-engine.ts";
 import { assignMessageRefs, type DcpMessage } from "./conversation.ts";
 import { getConfig } from "./config.ts";
 import { Logger } from "./logger.ts";
@@ -87,14 +87,11 @@ function assert(condition: unknown, message: string): asserts condition {
     if (!condition) throw new Error(message);
 }
 
-function makeCompressContext(mode: "range" | "message", messages: DcpMessage[]) {
+function makeCompressContext(messages: DcpMessage[]) {
     const state = createSessionState();
-    state.sessionKey = `test-${mode}`;
+    state.sessionKey = "test-range";
     assignMessageRefs(state, messages);
     const config = getConfig(process.cwd());
-    config.compress.mode = mode;
-    config.compress.protectUserMessages = false;
-    config.pruneNotification = "off";
     return {
         state,
         ctx: {
@@ -145,7 +142,7 @@ function makeCompressContext(mode: "range" | "message", messages: DcpMessage[]) 
         stoppedAssistant(["aborted-call"], "aborted"),
         text("continued after abort"),
     ]);
-    const { ctx } = makeCompressContext("range", messages);
+    const { ctx } = makeCompressContext(messages);
     const output = runRangeCompress(ctx, {
         topic: "aborted response recovery",
         content: [{
@@ -244,7 +241,7 @@ for (const [stopReason, callId] of [["stop", "stopped-call"], ["length", "length
         failedAssistant(["abandoned-a", "abandoned-b"]),
         text("continued after retry"),
     ]);
-    const { state, ctx } = makeCompressContext("range", messages);
+    const { state, ctx } = makeCompressContext(messages);
     const output = runRangeCompress(ctx, {
         topic: "failed response recovery",
         content: [{
@@ -325,7 +322,7 @@ for (const [stopReason, callId] of [["stop", "stopped-call"], ["length", "length
 
 {
     const messages = makeMessages([assistant(["range-call"]), text("range context"), result("range-call"), text("recent")]);
-    const { state, ctx } = makeCompressContext("range", messages);
+    const { state, ctx } = makeCompressContext(messages);
     const output = runRangeCompress(ctx, {
         topic: "range expansion",
         content: [{ startId: "m0001", endId: "m0001", summary: "Range call and intervening context." }],
@@ -334,19 +331,7 @@ for (const [stopReason, callId] of [["stop", "stopped-call"], ["length", "length
     assert(output.includes("Compressed 3 messages"), "Range mode must report the automatically expanded message count");
     assert(block?.effectiveMessageIds.join(",") === "entry-0,entry-1,entry-2", "Range mode must store both sides and the expanded span");
     assert(block.summary.includes("Range call and intervening context."), "Range mode must retain the submitted summary");
-}
-
-{
-    const messages = makeMessages([assistant(["message-call"]), text("message context"), result("message-call"), text("recent")]);
-    const { state, ctx } = makeCompressContext("message", messages);
-    const output = runMessageCompress(ctx, {
-        topic: "message expansion",
-        content: [{ messageId: "m0003", topic: "tool result", summary: "Message call and intervening context." }],
-    }, messages, "compress-message", () => {});
-    const block = state.prune.messages.blocksById.get(1);
-    assert(output.includes("Compressed 3 messages"), "Message mode must report the automatically expanded message count");
-    assert(block?.effectiveMessageIds.join(",") === "entry-0,entry-1,entry-2", "Message mode must store both sides and the expanded span");
-    assert(block.summary.includes("Message call and intervening context."), "Message mode must retain the submitted summary");
+    assert(block.mode === "range", "Newly created blocks must use range mode");
 }
 
 console.log("TOOL TRANSACTION AUTO-EXPANSION TEST PASSED");

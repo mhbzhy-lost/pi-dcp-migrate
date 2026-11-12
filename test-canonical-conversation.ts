@@ -70,10 +70,8 @@ assert(
 const state = createSessionState();
 state.sessionKey = "canonical-conversation";
 const config = getConfig(process.cwd());
-config.compress.protectUserMessages = false;
-config.pruneNotification = "off";
 const logger = new Logger(false);
-reconcileConversation(state, config, logger, toolConversation);
+reconcileConversation(state, logger, toolConversation);
 runRangeCompress({ state, config, logger }, {
     topic: "initial history",
     content: [{
@@ -104,7 +102,7 @@ entries.push({
 });
 leafId = "entry-continued";
 const continuedConversation = await buildConversationForTool(ctx);
-reconcileConversation(state, config, logger, continuedConversation);
+reconcileConversation(state, logger, continuedConversation);
 assert(state.prune.messages.blocksById.get(1)?.active, "Context reconciliation must keep the block active");
 
 const second = runRangeCompress({ state, config, logger }, {

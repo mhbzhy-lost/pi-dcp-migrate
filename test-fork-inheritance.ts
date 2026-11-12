@@ -62,8 +62,6 @@ const parentKey = sessionKeyFromSessionFile(parentFile);
 
 const parentState = createSessionState();
 parentState.sessionKey = parentKey;
-parentState.stats = { pruneTokenCounter: 111, totalPruneTokens: 222 };
-parentState.prune.tools.set("tool-1", 50);
 const kept = makeBlock(1, "e0", "e2", ["e0", "e1"]);
 const dropped = makeBlock(2, "e4", "e5", ["e4"]);
 parentState.prune.messages.blocksById.set(1, kept);
@@ -100,7 +98,6 @@ console.log("blocks:", [...forkState.prune.messages.blocksById.keys()]);
 console.log("activeBlocks:", [...forkState.prune.messages.activeBlockIds]);
 console.log("anchors:", [...forkState.prune.messages.activeByAnchorMessageId]);
 console.log("byMessageId:", [...forkState.prune.messages.byMessageId.keys()]);
-console.log("stats:", forkState.stats);
 
 if (forkState.sessionKey !== forkKey) throw new Error("fork state kept the ancestor session key");
 if (!forkState.prune.messages.blocksById.has(1)) throw new Error("surviving block was not inherited");
@@ -114,8 +111,6 @@ if (forkState.prune.messages.byMessageId.get("e1")?.activeBlockIds.length !== 1)
     throw new Error("inherited pruned entry lost its block reference");
 }
 if (forkState.prune.messages.blocksById.get(1)!.summary !== kept.summary) throw new Error("summary text lost");
-if (forkState.stats.totalPruneTokens !== 222) throw new Error("stats were not inherited");
-if (forkState.prune.tools.get("tool-1") !== 50) throw new Error("tool pruning was not inherited");
 if (forkState.prune.messages.nextBlockId < 3) throw new Error("nextBlockId regressed");
 
 // Then: the inherited state is persisted under the fork's own key, leaving the parent untouched
@@ -123,6 +118,22 @@ const forkStateFile = join(stateDir, `${forkKey}.json`);
 if (!existsSync(forkStateFile)) throw new Error("inherited state was not saved under the fork key");
 const savedFork = JSON.parse(readFileSync(forkStateFile, "utf-8"));
 if (Object.keys(savedFork.prune.messages.blocksById).length !== 1) throw new Error("saved fork state has wrong block count");
+// The legacy shape stays in the sidecar but is neutral: the fork did NOT inherit the
+// ancestor's pruning behaviour. Assert on the saved JSON (not runtime fields, which T5
+// deletes): manualMode false, prune.tools {}, cumulative stats 0, old anchors [].
+if (savedFork.manualMode !== false) throw new Error("saved fork manualMode is not neutral false");
+if (savedFork.prune.tools === undefined || Object.keys(savedFork.prune.tools).length !== 0) {
+    throw new Error("saved fork prune.tools is not neutral {}");
+}
+if (savedFork.stats.pruneTokenCounter !== 0 || savedFork.stats.totalPruneTokens !== 0) {
+    throw new Error("saved fork stats are not neutral 0");
+}
+if (!Array.isArray(savedFork.nudges.turnNudgeAnchors) || savedFork.nudges.turnNudgeAnchors.length !== 0) {
+    throw new Error("saved fork turnNudgeAnchors is not neutral []");
+}
+if (!Array.isArray(savedFork.nudges.iterationNudgeAnchors) || savedFork.nudges.iterationNudgeAnchors.length !== 0) {
+    throw new Error("saved fork iterationNudgeAnchors is not neutral []");
+}
 const savedParent = JSON.parse(readFileSync(join(stateDir, `${parentKey}.json`), "utf-8"));
 if (Object.keys(savedParent.prune.messages.blocksById).length !== 2) throw new Error("parent state was mutated");
 
@@ -140,12 +151,22 @@ console.log("blocks:", [...grandState.prune.messages.blocksById.keys()]);
 if (grandState.prune.messages.blocksById.size !== 0) throw new Error("state leaked across a broken parent chain");
 if (grandState.sessionKey !== grandKey) throw new Error("session key not set for a stateless session");
 
-// When: a session already has its own state, the ancestor is ignored
+// When: a session already has its own state, the ancestor is ignored.
+// Own-state priority is discriminated by the existing block set, not by stats (now always
+// neutral 0, which would make the old check trivially true). The seed reuses the existing
+// block 1 (anchor e0 / origin e2). The "own" session only carries e0, so if the ancestor
+// path were wrongly taken, restrictStateToEntries would drop block 1 (origin e2 absent).
+// Only reading own state (applyPersistedState applies no entry restriction) keeps block 1,
+// so its presence proves own state won and no ancestor block leaked.
 const ownFile = writeSession("own", ["e0"], parentFile);
 const ownKey = sessionKeyFromSessionFile(ownFile);
 const seedState = createSessionState();
 seedState.sessionKey = ownKey;
-seedState.stats = { pruneTokenCounter: 1, totalPruneTokens: 7 };
+seedState.prune.messages.blocksById.set(1, kept);
+seedState.prune.messages.activeBlockIds.add(1);
+seedState.prune.messages.activeByAnchorMessageId.set("e0", 1);
+seedState.prune.messages.nextBlockId = 2;
+seedState.prune.messages.nextRunId = 2;
 await saveSessionState(seedState, logger);
 
 const ownState = createSessionState();
@@ -155,8 +176,8 @@ await loadOrInheritSessionState(
     logger,
 );
 console.log("\n=== Own state wins ===");
-console.log("stats:", ownState.stats, "blocks:", ownState.prune.messages.blocksById.size);
-if (ownState.stats.totalPruneTokens !== 7) throw new Error("own state was overwritten by the ancestor");
-if (ownState.prune.messages.blocksById.size !== 0) throw new Error("ancestor blocks leaked into a session with own state");
+console.log("blocks:", [...ownState.prune.messages.blocksById.keys()]);
+if (!ownState.prune.messages.blocksById.has(1)) throw new Error("own state was overwritten by the ancestor");
+if (ownState.prune.messages.blocksById.size !== 1) throw new Error("ancestor blocks leaked into a session with own state");
 
 console.log("\nALL TESTS PASSED");
