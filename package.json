@@ -31,9 +31,10 @@
     "access": "public"
   },
   "scripts": {
-    "check:eloc": "npx --yes tsx test-architecture.ts",
-    "typecheck": "npx --yes tsc --noEmit",
-    "test": "for f in test-*.ts; do npx --yes tsx \"$f\" || exit 1; done",
+    "check:eloc": "tsx test-architecture.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "for f in test-*.ts; do tsx \"$f\" || exit 1; done",
+    "verify": "tsx scripts/verify.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run check:eloc"
   },
   "pi": {
@@ -60,5 +61,14 @@
     "typebox": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "26.4.1",
+    "typebox": "1.3.27",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
   }
 }

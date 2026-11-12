@@ -1,4 +1,5 @@
 node_modules/
+.evidence/
 .pi-subagents/
 *.js
 *.d.ts
