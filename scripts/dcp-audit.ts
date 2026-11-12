@@ -20,7 +20,7 @@ async function main(): Promise<number> {
             if (arg === "--run") run = value;
             if (arg === "--out") out = value;
         } else if (arg === "--help") {
-            console.log("node scripts/dcp-audit.ts [--session <hash> [--run <processRunId>] [--check] [--out <report.html>]]");
+            console.log("node dist/scripts/dcp-audit.js [--session <hash> [--run <processRunId>] [--check] [--out <report.html>]]");
             return 0;
         } else throw new Error(`未知参数: ${arg}`);
     }
@@ -30,7 +30,7 @@ async function main(): Promise<number> {
         if (!entries.length) console.log("无记录（审计默认关闭；不会创建录制目录）");
         for (const entry of entries) {
             console.log(`${entry.sessionHash} runs=${entry.runs} paused=${entry.paused} incomplete=${entry.incomplete}`);
-            console.log(`node scripts/dcp-audit.ts --session ${entry.sessionHash} --check`);
+            console.log(`node dist/scripts/dcp-audit.js --session ${entry.sessionHash} --check`);
             console.log(`npm run audit:report -- --session ${entry.sessionHash} --out report.html`);
         }
         return 0;

@@ -25,6 +25,7 @@
   "files": [
     "*.ts",
     "dcp.schema.json",
+    "dist/",
     "scripts/dcp-audit.ts",
     "!test-*.ts"
   ],
@@ -36,9 +37,10 @@
     "typecheck": "tsc --noEmit",
     "test": "for f in test-*.ts; do tsx \"$f\" || exit 1; done",
     "verify": "tsx scripts/verify.ts",
-    "audit:report": "node scripts/dcp-audit.ts",
+    "build:audit": "node scripts/build-audit.ts",
+    "audit:report": "node dist/scripts/dcp-audit.js",
     "verify:observability": "node scripts/verify-observability.ts",
-    "prepublishOnly": "npm run typecheck && npm test && npm run check:eloc"
+    "prepublishOnly": "npm run typecheck && npm test && npm run check:eloc && npm run build:audit"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "1.5.0",

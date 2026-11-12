@@ -156,11 +156,13 @@ DCP 的会话状态写入 sidecar 文件：`$XDG_DATA_HOME/pi/dcp/<sessionKey>.j
 
 ```bash
 # 列会话索引、状态和带实际 hash 的可复制命令，不导出全部正文
-node scripts/dcp-audit.ts
+node dist/scripts/dcp-audit.js
 # 用索引中的 hash 替换下例；可加 --run <processRunId>
-node scripts/dcp-audit.ts --session <session-key-hash> --check
+node dist/scripts/dcp-audit.js --session <session-key-hash> --check
 npm run audit:report -- --session <session-key-hash> --out report.html
 ```
+
+`dist/` 的 JavaScript 产物随 Git tag 和 npm 包一起交付，因此 `npm ci --ignore-scripts` 安装后也可运行，不依赖安装期编译、tsx 或 Pi 的加载器。修改报告源码后运行 `npm run build:audit`，使用 `npm run build:audit -- --check` 检查产物是否同步。Node 不支持直接擦除 `node_modules` 内的 `.ts`；不要在安装目录直接执行 `scripts/dcp-audit.ts`。例如在使用方项目运行 `node node_modules/@snowy117/pi-dcp/dist/scripts/dcp-audit.js` 即可列出录制索引。
 
 `--check` 只读校验记录、附件大小/哈希、三快照及同次差异；损坏、缺失、partial 或暂停返回非零。报告可在不完整时生成并显示缺口，但命令仍非零。报告独占新建，不覆盖已有文件。HTML 完全离线、无脚本/外部资源/上传，正文按文本转义并完整折叠，不截断原始数据。
 
