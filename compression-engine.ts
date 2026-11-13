@@ -13,7 +13,6 @@ import {
 import { materializePlan } from "./compression-summary.ts";
 import type {
     CompressionRuntime,
-    NotifyFn,
     RangeCompressArgs,
 } from "./compression-types.ts";
 import type { DcpMessage } from "./conversation.ts";
@@ -24,7 +23,6 @@ export function runRangeCompress(
     args: RangeCompressArgs,
     messages: DcpMessage[],
     toolCallId: string,
-    notify: NotifyFn,
 ): string {
     if (typeof args.topic !== "string" || !args.topic.trim()) throw new Error("topic is required and must be a non-empty string");
     if (!Array.isArray(args.content) || !args.content.length) throw new Error("content is required and must be a non-empty array");
@@ -48,7 +46,6 @@ export function runRangeCompress(
     observeAudit(runtime.audit, "requested", () => ({ compressCallId: toolCallId,
         phase: "resolved-selections", plans: requested.map(auditPlan) }));
     const result = compressPlans(runtime, messages, requested, args.topic, toolCallId);
-    notifyCompression(notify, result.blockIds, result.total);
     return `Compressed ${result.total} messages into ${result.blockIds.length} ${result.blockIds.length === 1 ? "block" : "blocks"} (${result.blockIds.map((id) => `b${id}`).join(", ")}).`;
 }
 
@@ -95,9 +92,4 @@ function auditPlan(plan: RangePlan) {
 function findCompressMessageId(messages: DcpMessage[], toolCallId: string): string {
     const owner = messages.find((entry) => entry.message.role === "assistant" && entry.message.content.some((block) => block.type === "toolCall" && block.id === toolCallId));
     return owner?.id ?? messages[messages.length - 1]?.id ?? "";
-}
-
-function notifyCompression(notify: NotifyFn, blockIds: number[], total: number): void {
-    if (!blockIds.length) return;
-    notify(`Compressed ${total} messages (${blockIds.map((id) => `b${id}`).join(", ")})`, "info");
 }

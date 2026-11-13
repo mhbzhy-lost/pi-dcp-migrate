@@ -82,7 +82,7 @@ function streamFailedAssistant(callIds: string[], stopReason: "error" | "aborted
             endId: lastRef!,
             summary: "User asked for a review, a stream error interrupted one response, and the conversation recovered.",
         }],
-    }, messages, "compress-call", () => {});
+    }, messages, "compress-call");
     assert(output.includes("Compressed 4 messages"), "Compression over the pi-invisible failed turn must succeed");
     const block = state.prune.messages.blocksById.get(1);
     assert(

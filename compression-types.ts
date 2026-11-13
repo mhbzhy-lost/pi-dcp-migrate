@@ -18,8 +18,6 @@ export interface CompressContext extends CompressionRuntime {
     audit?: AuditRecorder;
 }
 
-export type NotifyFn = (message: string, type?: "info" | "warning" | "error") => void;
-
 export interface RangeCompressArgs {
     topic: string;
     content: Array<{ startId: string; endId: string; summary: string }>;

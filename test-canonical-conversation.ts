@@ -79,7 +79,7 @@ runRangeCompress({ state, config, logger }, {
         endId: "m0002",
         summary: "The first request failed transiently and then recovered.",
     }],
-}, toolConversation, "first-compress", () => {});
+}, toolConversation, "first-compress");
 
 const inserted: AgentMessage = { role: "user", content: "extension-only context", timestamp: 4 };
 const projectedWithInsertion = await conversationFromContext(
@@ -112,7 +112,7 @@ const second = runRangeCompress({ state, config, logger }, {
         endId: "m0003",
         summary: "The recovered conversation continued.",
     }],
-}, continuedConversation, "second-compress", () => {});
+}, continuedConversation, "second-compress");
 assert(second.includes("(b2)"), "A block must remain usable as the next compression boundary");
 
 let staleError = "";
@@ -124,7 +124,7 @@ try {
             endId: "m0003",
             summary: "Retry a stale compressed boundary.",
         }],
-    }, continuedConversation, "stale-compress", () => {});
+    }, continuedConversation, "stale-compress");
 } catch (error) {
     staleError = error instanceof Error ? error.message : String(error);
 }

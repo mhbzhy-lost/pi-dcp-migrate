@@ -1,7 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runRangeCompress } from "./compression-engine.ts";
-import type { CompressContext, NotifyFn } from "./compression-types.ts";
+import type { CompressContext } from "./compression-types.ts";
 import { RANGE_FORMAT_EXTENSION } from "./prompts.ts";
 import { buildConversationForTool, reconcileConversation, sessionKeyFor } from "./session-runtime.ts";
 import { saveSessionState } from "./persistence.ts";
@@ -36,8 +36,7 @@ export function registerCompressTool(ctx: CompressContext): void {
             ensureToolSession(ctx, execCtx, messages);
             observeAudit(audit, "requested", () => ({ compressCallId: toolCallId,
                 phase: "identity-map", messageRefs: [...ctx.state.messageIds.byRawId] }));
-            const notify: NotifyFn = (message, type) => execCtx.ui.notify(message, type);
-            const result = runRangeCompress(ctx, params as Static<typeof RangeSchema>, messages, toolCallId, notify);
+            const result = runRangeCompress(ctx, params as Static<typeof RangeSchema>, messages, toolCallId);
             await saveSessionState(ctx.state, ctx.logger);
             observeAudit(audit, "tool-complete", () => ({ compressCallId: toolCallId, result,
                 note: "内存提交已完成；sidecar 自行处理写入错误，此事件不证明持久化或后续应用。" }));
@@ -69,4 +68,4 @@ export {
 } from "./compression-planner.ts";
 export { formatBlockRef } from "./compression-summary.ts";
 export { loadStateForSession, sessionKeyFor } from "./session-runtime.ts";
-export type { CompressContext, NotifyFn } from "./compression-types.ts";
+export type { CompressContext } from "./compression-types.ts";

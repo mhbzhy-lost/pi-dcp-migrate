@@ -150,7 +150,7 @@ function makeCompressContext(messages: DcpMessage[]) {
             endId: "m0002",
             summary: "The aborted response was abandoned and the conversation continued.",
         }],
-    }, messages, "compress-after-abort", () => {});
+    }, messages, "compress-after-abort");
     assert(output.includes("Compressed 2 messages"), "Aborted tool calls must not permanently block compression");
 }
 
@@ -249,7 +249,7 @@ for (const [stopReason, callId] of [["stop", "stopped-call"], ["length", "length
             endId: "m0003",
             summary: "The failed assistant response was abandoned and the conversation continued.",
         }],
-    }, messages, "compress-after-failed-response", () => {});
+    }, messages, "compress-after-failed-response");
     const block = state.prune.messages.blocksById.get(1);
     assert(output.includes("Compressed 3 messages"), "Failed assistant responses must not permanently block later compression");
     assert(
@@ -326,7 +326,7 @@ for (const [stopReason, callId] of [["stop", "stopped-call"], ["length", "length
     const output = runRangeCompress(ctx, {
         topic: "range expansion",
         content: [{ startId: "m0001", endId: "m0001", summary: "Range call and intervening context." }],
-    }, messages, "compress-range", () => {});
+    }, messages, "compress-range");
     const block = state.prune.messages.blocksById.get(1);
     assert(output.includes("Compressed 3 messages"), "Range mode must report the automatically expanded message count");
     assert(block?.effectiveMessageIds.join(",") === "entry-0,entry-1,entry-2", "Range mode must store both sides and the expanded span");
