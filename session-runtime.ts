@@ -2,7 +2,6 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
     assignMessageRefs,
-    collectEntryIds,
     findLastCompactionTimestamp,
     projectConversationMessages,
     toDcpMessages,
@@ -50,11 +49,12 @@ export async function buildConversationForTool(ctx: ExtensionContext): Promise<D
 }
 
 export async function buildCanonicalConversation(ctx: ExtensionContext): Promise<DcpMessage[]> {
-    const { buildSessionContext } = await import("@earendil-works/pi-coding-agent");
+    const { buildSessionProjection } = await import("@earendil-works/pi-coding-agent");
     const entries = ctx.sessionManager.getBranch();
     const leafId = ctx.sessionManager.getLeafId();
-    const built = buildSessionContext(entries, leafId);
-    return toDcpMessages(built.messages, collectEntryIds(entries, leafId));
+    const built = buildSessionProjection(entries, leafId);
+    const entryIds = built.entries.flatMap((entry) => entry.messages.map(() => entry.sourceEntry.id));
+    return toDcpMessages(built.messages, entryIds);
 }
 
 export async function loadStateForSession(state: SessionState, ctx: ExtensionContext, logger: Logger): Promise<void> {

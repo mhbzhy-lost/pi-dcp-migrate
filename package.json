@@ -1,6 +1,6 @@
 {
   "name": "@snowy117/pi-dcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Model-driven, range-only local context compression for the pi coding agent; a slimmed public fork of Snowy's pi-dcp (AGPL-3.0-or-later).",
   "license": "AGPL-3.0-or-later",
   "type": "module",
