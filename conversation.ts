@@ -55,7 +55,7 @@ export function collectConversationEntryIds(ctx: ExtensionContext): string[] {
     return collectEntryIds(ctx.sessionManager.getBranch(), ctx.sessionManager.getLeafId());
 }
 
-export function collectEntryIds(entries: Array<{ id: string; parentId?: string | null; type: string; summary?: unknown; firstKeptEntryId?: string; systemMessage?: unknown }>, leafId: string | null): string[] {
+export function collectEntryIds(entries: Array<{ id: string; parentId?: string | null; type: string; summary?: unknown; firstKeptEntryId?: string; systemMessage?: unknown; message?: { role?: string } }>, leafId: string | null): string[] {
     if (leafId === null || !entries.length) return [];
     const byId = new Map(entries.map((entry) => [entry.id, entry]));
     let current = leafId ? byId.get(leafId) : entries[entries.length - 1];
@@ -92,7 +92,7 @@ export function collectEntryIds(entries: Array<{ id: string; parentId?: string |
     for (let index = 0; index < compactionIndex; index++) {
         const entry = path[index]!;
         if (entry.id === compaction.firstKeptEntryId) kept = true;
-        if (kept) push(entry);
+        if (kept && !(entry.type === "message" && entry.message?.role === "system")) push(entry);
     }
     for (let index = compactionIndex + 1; index < path.length; index++) push(path[index]!);
     return ids;
