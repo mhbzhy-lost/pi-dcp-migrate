@@ -140,7 +140,7 @@ DCP 的会话状态写入 sidecar 文件：`$XDG_DATA_HOME/pi/dcp/<sessionKey>.j
 本 fork 的开发验证只覆盖**实际运行过的版本**，**不是**承诺的兼容矩阵：
 
 - **既有门禁 F1–F4：** 类型检查、架构门禁和九个既有脚本。当前执行结果见 `.evidence/runs/` 和 `.evidence/latest.json`；其中 `allPassed` 只代表 `requested` 列出的项目，不能把 F1–F4 子集通过当作全项目通过。
-- **运行版本：** Node `v26.8.1`、TypeScript `5.9.3`、tsx `4.20.6`、Pi（`@earendil-works/pi-*`）`1.5.0`、typebox `1.3.27`。`engines.node` 为 `>=22.19.0`、peer 依赖为 `*`，但本轮只声明上述实际运行过的版本，**不**把 peer 的 `*` 当作全版本支持矩阵。
+- **运行版本：** Node `v26.8.1`、TypeScript `5.9.3`、tsx `4.20.6`、Pi（`@earendil-works/pi-*`）`1.5.2`、typebox `1.3.27`。`engines.node` 为 `>=22.19.0`、peer 依赖为 `*`，但本轮只声明上述实际运行过的版本，**不**把 peer 的 `*` 当作全版本支持矩阵。
 - **继承状态：** 上一轮指纹 `443327e662c7a3977e904274253a64e59608f89da309c00dd389f83ebaf4c779` 的 F1–F5 通过，但 F6 失败：GLM-5.3 的真实会话没有自主调用 compress。退出写入竞态已修复并验证空块状态重启，但真实压缩块投影/延续/分支当时未取得证据。
 - **本次新增审计使旧 F5/F6 指纹过期。** 因此全量 `npm run verify` 的旧 F5/F6 预期 FAIL，不重新签发旧 F5，也不修改旧 F6 原失败。本次 `npm run verify:observability` 的 O1–O7 是另一份契约，权威索引为 `.evidence/observability/latest.json`；缺少真实录制或独立审阅证据时明确失败。即使人工请求的压缩实录成功，也不替代模型自主调用的旧 F6 验收。
 

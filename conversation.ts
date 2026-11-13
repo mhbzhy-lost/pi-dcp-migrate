@@ -55,7 +55,7 @@ export function collectConversationEntryIds(ctx: ExtensionContext): string[] {
     return collectEntryIds(ctx.sessionManager.getBranch(), ctx.sessionManager.getLeafId());
 }
 
-export function collectEntryIds(entries: Array<{ id: string; parentId?: string | null; type: string; summary?: unknown; firstKeptEntryId?: string }>, leafId: string | null): string[] {
+export function collectEntryIds(entries: Array<{ id: string; parentId?: string | null; type: string; summary?: unknown; firstKeptEntryId?: string; systemMessage?: unknown }>, leafId: string | null): string[] {
     if (leafId === null || !entries.length) return [];
     const byId = new Map(entries.map((entry) => [entry.id, entry]));
     let current = leafId ? byId.get(leafId) : entries[entries.length - 1];
@@ -81,6 +81,11 @@ export function collectEntryIds(entries: Array<{ id: string; parentId?: string |
         return ids;
     }
 
+    // buildSessionContext() expands a compaction entry into its optional
+    // system message followed by the compaction summary. Both messages come
+    // from the same session entry, so repeat the entry ID to preserve the
+    // positional mapping used by toDcpMessages().
+    if (compaction.systemMessage) ids.push(compaction.id);
     ids.push(compaction.id);
     const compactionIndex = path.indexOf(compaction);
     let kept = false;
