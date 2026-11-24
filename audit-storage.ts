@@ -1,9 +1,9 @@
 import { randomUUID, createHash } from "node:crypto";
 import { mkdir, writeFile, rename } from "node:fs/promises";
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { VERSION as piVersion } from "@earendil-works/pi-coding-agent";
 import { AUDIT_STATUS_MAX_BYTES } from "./audit-types.ts";
 import type { AuditAttachment, AuditEvent, AuditIdentity, AuditRecorder, AuditRecorderOptions,
     AuditRecord, AuditRunManifest, AuditStatus } from "./audit-types.ts";
@@ -25,9 +25,7 @@ function productionSource(): Pick<AuditRunManifest, "versions" | "productionSour
     names.push("package.json", "dcp.schema.json");
     const productionFiles = Object.fromEntries(names.sort().map((name) => [name, digest(readFileSync(join(root, name), "utf8"))]));
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-    const piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-    const pi = JSON.parse(readFileSync(join(dirname(piEntry), "..", "package.json"), "utf8"));
-    return { versions: { node: process.version, pi: pi.version, package: pkg.version }, productionFiles,
+    return { versions: { node: process.version, pi: piVersion, package: pkg.version }, productionFiles,
         productionSourceFingerprint: digest(Object.entries(productionFiles).map(([name, hash]) => `${name}:${hash}`).join("\n") + "\n") };
 }
 // 禁用时不执行源码扫描或任何文件写入。capture 同步冻结，flush 等待串行队列。

@@ -53,7 +53,7 @@ export class DcpController {
     install(): void {
         const { config, logger, state } = this.runtime;
         if (!config.enabled) return;
-        this.runtime.audit = createAuditRecorder({ config: { ...config.audit, enabled: true },
+        this.runtime.audit = createAuditRecorder({ config: config.audit,
             injectionLogging: { boundary: "DCP extension output; not provider request", detailedCompressionAudit: config.audit.enabled },
             warn: (message) => { if (this.auditNotify) this.auditNotify(message); else console.error(message); } });
         registerCompressTool({ pi: this.pi, state, config, logger, audit: config.audit.enabled ? this.runtime.audit : undefined, prompts: () => RUNTIME_PROMPTS });

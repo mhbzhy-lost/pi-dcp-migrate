@@ -90,7 +90,7 @@ DCP 读取自己的小配置，按以下顺序搜索（**后者覆盖前者**）
   "enabled": true,                    // false 时不注册工具/命令，不注入指引，不改写上下文
   "debug": false,                     // 调试日志
   "audit": {                         // 仅全局或 PI_CONFIG_DIR 可信层允许，项目层拒绝
-    "enabled": false,                // 默认关闭全量压缩审计；注入日志始终启用
+    "enabled": false,                // 默认关闭本地审计与注入日志；排障时显式设为 true 开启
     "maxRunBytes": 268435456          // 单次录制预算，正安全整数；默认 256 MiB
   },
   "protectedFilePatterns": [],        // 命中文件的工具输出追加进摘要
